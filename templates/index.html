@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>板材裁切排样台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <h1>🪚 板材裁切排样台</h1>
+    <div class="tb-group">
+      <input id="project-name" type="text" placeholder="项目名称" value="未命名项目">
+      <button id="btn-save" title="保存到本地数据库">保存</button>
+      <button id="btn-open" title="打开已保存的项目">打开</button>
+      <button id="btn-new" title="新建空白项目">新建</button>
+    </div>
+    <div class="tb-group">
+      <button id="btn-undo" title="撤销 (Ctrl+Z)" disabled>↩ 撤销</button>
+      <button id="btn-redo" title="重做 (Ctrl+Y)" disabled>↪ 重做</button>
+    </div>
+    <div class="tb-group">
+      <button id="btn-print" class="accent" title="生成带尺寸标注与切割顺序的打印视图">🖨 打印视图</button>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- 左侧：定义面板 -->
+    <aside id="sidebar">
+      <section class="panel">
+        <h2>参数设置</h2>
+        <div class="form-grid">
+          <label>锯缝 (mm)<input id="set-kerf" type="number" min="0" step="0.5"></label>
+          <label>板边留量 (mm)<input id="set-margin" type="number" min="0" step="1"></label>
+          <label>零件间距 (mm)<input id="set-spacing" type="number" min="0" step="0.5"></label>
+        </div>
+        <p class="hint">零件间净距 = 锯缝 + 零件间距；所有零件与板边保持"板边留量"。</p>
+      </section>
+
+      <section class="panel">
+        <h2>原料板</h2>
+        <table class="def-table" id="sheets-table">
+          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>纹理</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="add-row">
+          <input id="sh-name" type="text" placeholder="名称" value="多层板">
+          <input id="sh-w" type="number" placeholder="宽" value="2440">
+          <input id="sh-h" type="number" placeholder="高" value="1220">
+          <input id="sh-qty" type="number" placeholder="数量" value="1" min="1">
+          <select id="sh-grain">
+            <option value="none">无纹理</option>
+            <option value="horizontal">横向纹理</option>
+            <option value="vertical">纵向纹理</option>
+          </select>
+          <button id="btn-add-sheet">＋</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>零件</h2>
+        <table class="def-table" id="parts-table">
+          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>可旋转</th><th>纹理</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="add-row">
+          <input id="pt-name" type="text" placeholder="名称" value="侧板">
+          <input id="pt-w" type="number" placeholder="宽" value="600">
+          <input id="pt-h" type="number" placeholder="高" value="400">
+          <input id="pt-qty" type="number" placeholder="数量" value="1" min="1">
+          <select id="pt-rot"><option value="1">可旋转</option><option value="0">不可旋转</option></select>
+          <select id="pt-grain">
+            <option value="none">无纹理</option>
+            <option value="horizontal">横向纹理</option>
+            <option value="vertical">纵向纹理</option>
+          </select>
+          <button id="btn-add-part">＋</button>
+        </div>
+      </section>
+
+      <section class="panel actions">
+        <button id="btn-nest" class="primary">⚙ 生成排样方案</button>
+        <button id="btn-renest" title="锁定区域保持不动，其余零件重新排样">🔒 保留锁定重排</button>
+        <button id="btn-clear-layout" title="清空当前排样结果">清空排样</button>
+        <button id="btn-sample" title="载入示例数据">载入示例</button>
+      </section>
+    </aside>
+
+    <!-- 中间：方案标签 + 画布 -->
+    <div id="workspace">
+      <div id="layout-tabs"><span class="hint">尚未生成排样方案 — 请在左侧定义板材与零件后点击"生成排样方案"</span></div>
+      <div id="canvas-wrap">
+        <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div id="canvas-toolbar">
+          <button id="tb-zoom-in" title="放大">＋</button>
+          <button id="tb-zoom-out" title="缩小">－</button>
+          <button id="tb-fit" title="适应窗口">⛶</button>
+          <span class="sep"></span>
+          <button id="tb-rotate" title="旋转选中零件 (R)">⟳</button>
+          <button id="tb-lock" title="锁定/解锁选中零件 (L)">🔒</button>
+          <button id="tb-delete" title="从板材移除选中零件 (Del)">✕</button>
+        </div>
+        <div id="canvas-hint">滚轮缩放 · 拖动空白处平移 · 拖动零件移动（可跨板）· R 旋转 · L 锁定 · Del 移除</div>
+      </div>
+      <div id="statusbar"><span id="st-info">就绪</span><span id="st-pos"></span><span id="zoom-label"></span></div>
+    </div>
+
+    <!-- 右侧：选中项 / 违规 / 未放置 -->
+    <aside id="rightbar">
+      <section class="panel" id="selection-panel">
+        <h2>选中零件</h2>
+        <div class="panel-body" id="selection-body"><p class="hint">点击画布中的零件进行选择</p></div>
+      </section>
+      <section class="panel" id="violations-panel">
+        <h2>违规检查 <span id="violation-count" class="badge"></span></h2>
+        <ul id="violations-list" class="msg-list"><li class="ok">无违规</li></ul>
+      </section>
+      <section class="panel" id="unplaced-panel">
+        <h2>未放置零件 <span id="unplaced-count" class="badge"></span></h2>
+        <ul id="unplaced-list" class="msg-list"><li class="ok">全部已放置</li></ul>
+        <p class="hint">点击未放置零件后，在画布目标板材上点击即可手动放置。</p>
+      </section>
+    </aside>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast"></div>
+
+  <script src="/static/js/state.js"></script>
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/validate.js"></script>
+  <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <script src="/static/js/print.js"></script>
+  <script src="/static/js/main.js"></script>
+</body>
+</html>
