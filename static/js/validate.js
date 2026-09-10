@@ -1,9 +1,16 @@
-/* 实时违规校验：重叠 / 越界 / 间距 / 纹理方向 / 定义一致性 */
+/* 实时违规校验：重叠 / 越界 / 间距 / 纹理方向（含原料板纹理）/ 定义一致性 */
 const Validate = {
   EPS: 1e-6,
 
   gap() { return (+App.settings.kerf || 0) + (+App.settings.spacing || 0); },
   margin() { return +App.settings.margin || 0; },
+
+  /* 零件纹理与板材纹理是否冲突（双方均指定且不一致） */
+  grainConflict(partGrain, sheetGrain) {
+    return partGrain && partGrain !== 'none' &&
+           sheetGrain && sheetGrain !== 'none' && partGrain !== sheetGrain;
+  },
+  grainLabel(g) { return { horizontal: '横向', vertical: '纵向' }[g] || '无'; },
 
   /* 全量校验当前方案，返回 { vmap: Map<uid, Set<code>>, messages: [{uid, code, msg}] } */
   check() {
@@ -42,7 +49,7 @@ const Validate = {
           flag(p.uid, 'nodef');
           say(p.uid, 'nodef', `${p.uid} 的零件定义已被删除`);
         } else {
-          // 纹理 / 旋转方向
+          // 纹理 / 旋转方向（与后端 orientations 规则一致）
           if (p.rotated && !pd.rotatable) {
             flag(p.uid, 'grain');
             say(p.uid, 'grain', `${p.uid}（${pd.name}）设为不可旋转，但当前被旋转`);
@@ -54,6 +61,12 @@ const Validate = {
           if (pd.grain === 'vertical' && !p.rotated) {
             flag(p.uid, 'grain');
             say(p.uid, 'grain', `${p.uid}（${pd.name}）纹理须垂直，应旋转 90°`);
+          }
+          // 原料板纹理参与判断
+          const sg = def.grain || 'none';
+          if (this.grainConflict(pd.grain, sg)) {
+            flag(p.uid, 'grain');
+            say(p.uid, 'grain', `${p.uid}（${pd.name}）纹理（${this.grainLabel(pd.grain)}）与板材纹理（${this.grainLabel(sg)}）冲突`);
           }
           // 尺寸与定义一致性
           const ow = p.rotated ? +pd.height : +pd.width;
@@ -88,7 +101,7 @@ const Validate = {
     return { vmap, messages };
   },
 
-  /* 拖拽过程中的快速校验：候选位置是否合法（越界 / 间距 / 重叠） */
+  /* 拖拽过程中的快速校验：候选位置是否合法（越界 / 间距 / 重叠 / 板材纹理） */
   checkPlacement(sheetIdx, uid, x, y, w, h) {
     const lay = App.layout();
     if (!lay || !lay.sheets[sheetIdx]) return false;
@@ -96,6 +109,9 @@ const Validate = {
     const def = App.sheetDef(si.sheetId) || si;
     const W = +def.width, H = +def.height;
     const m = this.margin(), gap = this.gap();
+    // 原料板纹理与零件纹理冲突 → 该板不可放
+    const pd = App.uidPart(uid);
+    if (pd && this.grainConflict(pd.grain, def.grain || 'none')) return false;
     if (x < m - this.EPS || y < m - this.EPS ||
         x + w > W - m + this.EPS || y + h > H - m + this.EPS) return false;
     for (const p of si.placements) {

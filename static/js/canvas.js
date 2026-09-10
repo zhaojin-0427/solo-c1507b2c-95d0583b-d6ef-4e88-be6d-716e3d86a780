@@ -279,12 +279,12 @@ const Canvas = {
     const lx = Math.max(0, Math.round(d.worldX - off.x));
     const ly = Math.max(0, Math.round(d.worldY - off.y));
 
-    App.pushHistory();
     const arr = lay.sheets[d.fromSheet].placements;
     const i = arr.findIndex(p => p.uid === d.uid);
     const [p] = arr.splice(i, 1);
     p.x = lx; p.y = ly;
     lay.sheets[tIdx].placements.push(p);
+    App.pushHistory();
     renderAll();
   },
 
@@ -319,7 +319,6 @@ const Canvas = {
     const x = Math.max(0, Math.round(wpt.x - off.x - w / 2));
     const y = Math.max(0, Math.round(wpt.y - off.y - h / 2));
 
-    App.pushHistory();
     const [u] = lay.unplaced.splice(ui, 1);
     lay.sheets[tIdx].placements.push({
       uid: u.uid, partId: u.partId, name: u.name || u.partId,
@@ -327,6 +326,7 @@ const Canvas = {
     });
     App.placeMode = null;
     App.selected = uid;
+    App.pushHistory();
     this.svg.classList.remove('place-mode');
     renderAll();
     toast(`已放置 ${uid}，可拖动微调`);

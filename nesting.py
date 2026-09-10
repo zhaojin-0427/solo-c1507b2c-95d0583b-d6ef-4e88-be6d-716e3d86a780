@@ -48,23 +48,29 @@ def expand_sheets(sheets):
                 'instance': i,
                 'w': _f(s.get('width')),
                 'h': _f(s.get('height')),
+                'grain': s.get('grain', 'none'),
             })
     return insts
 
 
-def orientations(inst):
-    """零件允许的摆放方向，返回 [(w, h, rotated), ...]。
+def orientations(inst, sheet_grain='none'):
+    """零件在指定纹理板材上的允许摆放方向，返回 [(w, h, rotated), ...]。
 
-    纹理规则：horizontal = 纹理必须沿板材宽度方向（不可旋转）；
-    vertical = 纹理必须沿板材高度方向（必须旋转 90°）；none = 任意（受 rotatable 约束）。
+    统一约束（与前端 Validate 一致）：
+    - rotatable=False 的零件任何情况下都不旋转，包括为满足纹理要求；
+    - 零件纹理 horizontal → 不可旋转；vertical → 须旋转 90°（不可旋转则无解）；
+    - 原料板纹理与零件纹理均指定且不一致 → 该板不可放置（返回空）。
     """
     w, h = inst['w'], inst['h']
     grain = inst.get('grain', 'none')
+    rotatable = bool(inst.get('rotatable', True))
+    if grain != 'none' and sheet_grain != 'none' and grain != sheet_grain:
+        return []
     if grain == 'horizontal':
         return [(w, h, False)]
     if grain == 'vertical':
-        return [(h, w, True)]
-    if inst.get('rotatable', True) and abs(w - h) > EPS:
+        return [(h, w, True)] if rotatable else []
+    if rotatable and abs(w - h) > EPS:
         return [(w, h, False), (h, w, True)]
     return [(w, h, False)]
 
@@ -78,14 +84,14 @@ def _conflicts(x, y, w, h, placed, gap):
     return False
 
 
-def _find_position(inst, placed, uw, uh, gap):
+def _find_position(inst, placed, uw, uh, gap, sheet_grain='none'):
     """在单张板材可用区域内寻找最靠下、再最靠左（Bottom-Left）的可行位置。"""
     best = None  # (y, x, w, h, rotated)
     cands = {(0.0, 0.0)}
     for r in placed:
         cands.add((r['x'] + r['w'] + gap, r['y']))
         cands.add((r['x'], r['y'] + r['h'] + gap))
-    for w, h, rot in orientations(inst):
+    for w, h, rot in orientations(inst, sheet_grain):
         if w > uw + EPS or h > uh + EPS:
             continue
         for cx, cy in sorted(cands):
@@ -132,20 +138,31 @@ def _sheet_cuts(placed, uw, uh):
 
 
 def _unplaced_reason(inst, sheet_insts, margin):
-    max_uw = max_uh = 0.0
+    """解释零件无法放置的原因：纹理/旋转约束冲突、尺寸超限或空间不足。"""
+    grain = inst.get('grain', 'none')
+    grain_label = {'horizontal': '横向', 'vertical': '纵向'}.get(grain, '')
+    # 零件自身约束矛盾：要求纵向纹理但不可旋转
+    if not orientations(inst):
+        return f"零件要求{grain_label}纹理但设为不可旋转，约束冲突，无法放置"
+    # 原料板纹理参与判断：仅纹理匹配的板材可用于该零件
+    compatible = [s for s in sheet_insts
+                  if orientations(inst, s.get('grain', 'none'))]
+    if not compatible:
+        return f"零件纹理（{grain_label}）与所有原料板纹理方向冲突，无法放置"
+    max_uw = max(s['w'] - 2 * margin for s in compatible)
+    max_uh = max(s['h'] - 2 * margin for s in compatible)
     fits_some = False
-    for s in sheet_insts:
+    for s in compatible:
         uw, uh = s['w'] - 2 * margin, s['h'] - 2 * margin
-        max_uw, max_uh = max(max_uw, uw), max(max_uh, uh)
-        for w, h, _ in orientations(inst):
+        for w, h, _ in orientations(inst, s.get('grain', 'none')):
             if w <= uw + EPS and h <= uh + EPS:
                 fits_some = True
                 break
+        if fits_some:
+            break
     if not fits_some:
-        grain = inst.get('grain', 'none')
-        note = {'horizontal': '（纹理要求水平，不可旋转）',
-                'vertical': '（纹理要求垂直，须旋转 90°）'}.get(grain, '')
-        return (f"尺寸 {inst['w']:g}×{inst['h']:g} 超出所有板材可用区域"
+        note = f"（纹理{grain_label}，仅限纹理匹配板材）" if grain_label else ''
+        return (f"尺寸 {inst['w']:g}×{inst['h']:g} 超出可用板材区域"
                 f"（最大可用 {max_uw:g}×{max_uh:g}）{note}")
     return "板材剩余空间不足，无法容纳"
 
@@ -183,7 +200,8 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
         for st in states:  # 按板材顺序 first-fit，优先填满前面的板
             if st['uw'] <= EPS or st['uh'] <= EPS:
                 continue
-            pos = _find_position(inst, st['placed'], st['uw'], st['uh'], gap)
+            pos = _find_position(inst, st['placed'], st['uw'], st['uh'], gap,
+                                 st['def'].get('grain', 'none'))
             if pos is not None:
                 st['placed'].append({
                     'uid': inst['uid'], 'partId': inst['partId'], 'name': inst['name'],

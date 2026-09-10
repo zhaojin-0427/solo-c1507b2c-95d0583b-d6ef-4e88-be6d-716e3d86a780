@@ -86,9 +86,9 @@ const UI = {
         (st.unplacedCount ? ` · <span class="bad">未放 ${st.unplacedCount}</span>` : '') + `</div>`;
       b.addEventListener('click', () => {
         if (App.active === i) return;
-        App.pushHistory();
         App.active = i;
         App.selected = null;
+        App.pushHistory();
         renderAll();
       });
       box.appendChild(b);
@@ -121,18 +121,20 @@ const UI = {
         <button id="sel-delete">✕ 移除</button>
       </div>`;
     body.querySelector('#sel-x').addEventListener('change', (e) => {
-      App.pushHistory(); p.x = Math.max(0, +e.target.value || 0); renderAll();
+      p.x = Math.max(0, +e.target.value || 0);
+      App.pushHistory(); renderAll();
     });
     body.querySelector('#sel-y').addEventListener('change', (e) => {
-      App.pushHistory(); p.y = Math.max(0, +e.target.value || 0); renderAll();
+      p.y = Math.max(0, +e.target.value || 0);
+      App.pushHistory(); renderAll();
     });
     body.querySelector('#sel-sheet').addEventListener('change', (e) => {
       const to = +e.target.value;
       if (to === found.sheetIndex) return;
-      App.pushHistory();
       const arr = lay.sheets[found.sheetIndex].placements;
       arr.splice(arr.findIndex(q => q.uid === uid), 1);
       lay.sheets[to].placements.push(p);
+      App.pushHistory();
       renderAll();
     });
     body.querySelector('#sel-lock').addEventListener('change', () => Main.toggleLock());

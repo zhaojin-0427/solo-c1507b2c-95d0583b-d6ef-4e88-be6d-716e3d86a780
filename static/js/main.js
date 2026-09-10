@@ -186,9 +186,9 @@ const Main = {
         e.preventDefault();
         const step = e.shiftKey ? 10 : 1;
         const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-        App.pushHistory();
         found.placement.x = Math.max(0, found.placement.x + d[0]);
         found.placement.y = Math.max(0, found.placement.y + d[1]);
+        App.pushHistory();
         renderAll();
       }
     });
@@ -205,9 +205,9 @@ const Main = {
     if (!pd) return;
     if (pd.grain !== 'none') { toast(`「${pd.name}」有纹理方向要求，不能旋转`); return; }
     if (!pd.rotatable) { toast(`「${pd.name}」设为不可旋转`); return; }
-    App.pushHistory();
     [p.w, p.h] = [p.h, p.w];
     p.rotated = !p.rotated;
+    App.pushHistory();
     renderAll();
   },
 
@@ -215,8 +215,8 @@ const Main = {
     const uid = App.selected;
     const found = uid && App.findPlacement(uid);
     if (!found) { toast('请先选择一个零件'); return; }
-    App.pushHistory();
     found.placement.locked = !found.placement.locked;
+    App.pushHistory();
     renderAll();
     toast(found.placement.locked ? `${uid} 已锁定` : `${uid} 已解锁`);
   },
@@ -226,11 +226,11 @@ const Main = {
     const found = uid && App.findPlacement(uid);
     if (!found) return;
     const lay = App.layout();
-    App.pushHistory();
     const arr = lay.sheets[found.sheetIndex].placements;
     const [p] = arr.splice(arr.findIndex(q => q.uid === uid), 1);
     lay.unplaced.push({ uid: p.uid, partId: p.partId, name: p.name, reason: '手动移除，等待重新放置' });
     App.selected = null;
+    App.pushHistory();
     renderAll();
   },
 
@@ -322,6 +322,7 @@ const Main = {
 
 /* ---- 全局渲染入口 ---- */
 function renderAll() {
+  App.layouts.forEach(recomputeLayoutStats);  // 本地编辑后统计立即重算
   App.violations = Validate.check();
   Canvas.render();
   UI.renderTabs();

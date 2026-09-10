@@ -30,7 +30,9 @@ App.findPlacement = function (uid) {
   return null;
 };
 
-/* ---- 撤销 / 重做（快照式） ---- */
+/* ---- 撤销 / 重做（快照式） ----
+   约定：pushHistory() 在每次变更【之后】调用，压入变更后的新状态，
+   保证 history[hIndex] 始终等于当前状态，撤销/重做逐步移动指针。 */
 App.snapshot = function () {
   return JSON.stringify({ layouts: App.layouts, active: App.active });
 };
@@ -41,7 +43,7 @@ App.restore = function (snap) {
   if (App.active < 0) App.active = 0;
 };
 App.pushHistory = function () {
-  App.history = App.history.slice(0, App.hIndex + 1);
+  App.history = App.history.slice(0, App.hIndex + 1);  // 丢弃重做分支
   App.history.push(App.snapshot());
   if (App.history.length > 100) App.history.shift();
   App.hIndex = App.history.length - 1;
@@ -95,4 +97,62 @@ function toast(msg, ms = 2600) {
   t.classList.add('show');
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+/* ---- 方案统计实时重算 ----
+   与后端 nesting.py 的估算口径一致：切割数 = 递归贯通切割 + 修边；
+   利用率/废料按"有零件的板材"面积计算。任何本地编辑（删除、拖动、
+   旋转、手动放置、撤销/重做）后由 renderAll 调用，保证方案标签、
+   状态栏与打印摘要一致。 */
+function guillotineCuts(rects) {
+  if (rects.length <= 1) return 0;
+  const EPS = 1e-6;
+  const xs = [...new Set(rects.map(r => Math.round((r.x + r.w) * 1e6) / 1e6))].sort((a, b) => a - b);
+  for (const c of xs) {
+    const L = rects.filter(r => r.x + r.w <= c + EPS);
+    const R = rects.filter(r => r.x >= c - EPS);
+    if (L.length && R.length && L.length + R.length === rects.length)
+      return 1 + guillotineCuts(L) + guillotineCuts(R);
+  }
+  const ys = [...new Set(rects.map(r => Math.round((r.y + r.h) * 1e6) / 1e6))].sort((a, b) => a - b);
+  for (const c of ys) {
+    const T = rects.filter(r => r.y + r.h <= c + EPS);
+    const B = rects.filter(r => r.y >= c - EPS);
+    if (T.length && B.length && T.length + B.length === rects.length)
+      return 1 + guillotineCuts(T) + guillotineCuts(B);
+  }
+  return rects.length;  // 非贯通区域按零件数估算
+}
+
+function recomputeLayoutStats(lay) {
+  if (!lay) return;
+  const EPS = 1e-6;
+  const m = +App.settings.margin || 0;
+  let placedCount = 0, placedArea = 0, usedSheets = 0, usedArea = 0, cuts = 0;
+  lay.sheets.forEach((si) => {
+    const def = App.sheetDef(si.sheetId) || si;
+    const W = +def.width, H = +def.height;
+    const ps = si.placements;
+    placedCount += ps.length;
+    ps.forEach(p => { placedArea += p.w * p.h; });
+    if (!ps.length) return;
+    usedSheets++;
+    usedArea += W * H;
+    cuts += guillotineCuts(ps);
+    const minx = Math.min(...ps.map(p => p.x));
+    const miny = Math.min(...ps.map(p => p.y));
+    const maxx = Math.max(...ps.map(p => p.x + p.w));
+    const maxy = Math.max(...ps.map(p => p.y + p.h));
+    // 修边：零件未贴到可用区域边缘的每一边修一次
+    cuts += [minx > m + EPS, miny > m + EPS,
+             maxx < W - m - EPS, maxy < H - m - EPS].filter(Boolean).length;
+  });
+  lay.stats = lay.stats || {};
+  lay.stats.placedCount = placedCount;
+  lay.stats.unplacedCount = lay.unplaced.length;
+  lay.stats.usedSheets = usedSheets;
+  lay.stats.totalSheets = lay.sheets.length;
+  lay.stats.utilization = usedArea ? placedArea / usedArea : 0;
+  lay.stats.waste = usedArea - placedArea;
+  lay.stats.cuts = cuts;
 }
