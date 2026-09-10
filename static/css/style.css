@@ -199,3 +199,102 @@ input:focus, select:focus { outline: 2px solid #90caf9; }
 #toast.show { opacity: 1; }
 
 .busy #btn-nest { opacity: .6; pointer-events: none; }
+
+/* ---- 裁切工序演练面板 ---- */
+#cutpanel {
+  flex: 0 0 auto; height: 280px; background: var(--panel);
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0;
+}
+#cutpanel.hidden { display: none; }   /* 关闭时真正收起，不占空间，画布恢复 */
+#cp-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 10px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+#cp-head strong { font-size: 13px; color: #455a64; white-space: nowrap; }
+#cp-sheet-tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1 1 auto; }
+.cp-sheet-tab {
+  border: 1px solid var(--border); background: #fff; border-radius: 5px;
+  padding: 2px 8px; font-size: 12px; white-space: nowrap; cursor: pointer;
+}
+.cp-sheet-tab .s { color: var(--muted); font-size: 11px; }
+.cp-sheet-tab.active { border-color: var(--primary); box-shadow: 0 0 0 1px #90caf9 inset; }
+#cp-note { color: var(--warn); font-size: 11px; white-space: nowrap; }
+#cp-close { flex: 0 0 auto; padding: 2px 8px; }
+#topbar button.on { background: var(--accent); border-color: var(--accent); }
+
+#cp-body { flex: 1 1 auto; display: flex; min-height: 0; }
+#cp-side {
+  width: 400px; flex: 0 0 auto; overflow-y: auto;
+  padding: 6px 10px; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px;
+}
+#cp-stats { font-size: 12px; line-height: 1.6; }
+#cp-stats .bad { color: var(--danger); font-weight: 600; }
+#cp-controls { display: flex; align-items: center; gap: 4px; }
+#cp-controls button { padding: 3px 9px; flex: 0 0 auto; }
+#cp-slider { flex: 1 1 auto; min-width: 0; }
+#cp-pos { font-size: 12px; color: var(--muted); white-space: nowrap; }
+#cp-current {
+  font-size: 12px; line-height: 1.6; background: var(--accent-soft);
+  border: 1px solid #ffe0b2; border-radius: 5px; padding: 5px 8px;
+}
+#cp-current .ok { color: var(--ok); }
+#cp-current .bad { color: var(--danger); }
+.cp-cands { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 4px; }
+.cp-cand {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px;
+  border: 1px solid var(--border); background: #fff; cursor: pointer;
+}
+.cp-cand.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+#cp-manual h3, #cp-remnants h3 { font-size: 12px; margin: 2px 0; color: #455a64; }
+.cp-manual-item {
+  font-size: 12px; background: #ffebee; border-left: 3px solid var(--danger);
+  border-radius: 4px; padding: 4px 6px; margin-bottom: 4px; line-height: 1.5;
+}
+.cp-manual-item a { color: var(--primary); cursor: pointer; text-decoration: underline; }
+.cp-remnants { display: flex; flex-wrap: wrap; gap: 4px; }
+.cp-remnant {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px;
+  background: #eceff1; color: var(--muted);
+}
+.cp-remnant.ok { background: #e8f5e9; color: var(--ok); font-weight: 600; }
+
+#cp-steps-wrap { flex: 1 1 auto; overflow: auto; min-width: 0; }
+#cp-steps { width: 100%; border-collapse: collapse; font-size: 12px; }
+#cp-steps th {
+  position: sticky; top: 0; background: #eceff1; color: #546e7a;
+  font-weight: 600; text-align: left; padding: 4px 6px; z-index: 1;
+}
+#cp-steps td { padding: 3px 6px; border-bottom: 1px solid #eceff1; white-space: nowrap; }
+#cp-steps td.cp-out { white-space: normal; font-size: 11px; color: #546e7a; }
+#cp-steps tbody tr { cursor: pointer; }
+#cp-steps tbody tr:hover { background: #f5f5f5; }
+#cp-steps tr.cp-done { opacity: .5; }
+#cp-steps tr.cp-current { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+#cp-steps .ops { white-space: nowrap; }
+.cp-op { font-size: 11px; padding: 1px 6px; margin-right: 2px; }
+
+/* ---- 画布 SVG 工序高亮层 ---- */
+.cut-overlay { pointer-events: none; }
+.cut-done { stroke: #90a4ae; stroke-width: 2.5; stroke-dasharray: 12 8; opacity: .8; }
+.cut-part-done { fill: rgba(46, 125, 50, .22); stroke: none; }
+.cut-current-board {
+  fill: rgba(255, 152, 0, .10); stroke: #ef6c00; stroke-width: 6;
+}
+.cut-blade { fill: rgba(211, 47, 47, .20); }
+.cut-current-line {
+  stroke: #d32f2f; stroke-width: 4; stroke-dasharray: 22 12;
+  animation: cutdash 1s linear infinite;
+}
+@keyframes cutdash { to { stroke-dashoffset: -34; } }
+.cut-produce { fill: none; stroke-width: 4; }
+.cut-produce.kind-part { stroke: #2e7d32; fill: rgba(46, 125, 50, .14); }
+.cut-produce.kind-remnant { stroke: #8d6e63; stroke-dasharray: 10 7; }
+.cut-produce.kind-stock { stroke: #1565c0; }
+.cut-produce.kind-blocked { stroke: #c62828; stroke-dasharray: 10 7; }
+.cut-blocked {
+  fill: rgba(198, 40, 40, .10); stroke: #c62828;
+  stroke-width: 4; stroke-dasharray: 14 8;
+}
+.cut-label { fill: #37474f; font-weight: 600; }

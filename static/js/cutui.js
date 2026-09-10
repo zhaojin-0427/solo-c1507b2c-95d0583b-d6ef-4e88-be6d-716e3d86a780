@@ -23,10 +23,9 @@ const CutUI = {
   /* renderAll 钩子：面板打开时让工序与当前排样保持同步 */
   refresh() {
     document.getElementById('btn-cutplan').classList.toggle('on', App.cutOpen);
-    if (!App.cutOpen) return;
-    CutPlan.ensure();
-    this.renderPanel();
-    this.renderOverlay();
+    if (App.cutOpen) CutPlan.ensure();
+    this.renderPanel();    // 内部处理 hidden：关闭时真正收起面板、恢复画布空间
+    this.renderOverlay();  // 先移除旧 cut-overlay；关闭时不再画新高亮
   },
 
   /* 当前板下标 / 计划 / 顺序 / 游标（钳制在有效范围） */
@@ -288,6 +287,8 @@ const CutUI = {
 
   /* ---- 画布高亮层 ---- */
   renderOverlay() {
+    // 先移除旧高亮：画布上任何时候只保留当前步骤的一层 cut-overlay
+    if (Canvas.svg) Canvas.svg.querySelectorAll('.cut-overlay').forEach(n => n.remove());
     if (!App.cutOpen || !App.cutplanData) return;
     const lay = App.layout();
     if (!lay) return;

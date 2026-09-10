@@ -1,6 +1,6 @@
-/* 打印视图：生成独立窗口，含尺寸标注、切割顺序与零件编号 */
+/* 打印视图：生成独立窗口，含尺寸标注、裁切工序（已选切法与当前步骤顺序）、
+   人工处理项与零件清单。切线不再另行推导，直接采用 CutPlan 的分析结果。 */
 const Print = {
-  EPS: 1e-6,
 
   open() {
     const lay = App.layout();
@@ -12,35 +12,29 @@ const Print = {
     win.document.close();
   },
 
-  /* 递归提取贯通切割线（guillotine），返回 [{o:'v'|'h', at, from, to}] */
-  extractCuts(parts, x0, y0, x1, y1, out) {
-    if (parts.length <= 1) return;
-    const xs = [...new Set(parts.map(r => Math.round((r.x + r.w) * 1000) / 1000))].sort((a, b) => a - b);
-    for (const c of xs) {
-      const L = parts.filter(r => r.x + r.w <= c + this.EPS);
-      const R = parts.filter(r => r.x >= c - this.EPS);
-      if (L.length && R.length && L.length + R.length === parts.length) {
-        out.push({ o: 'v', at: c, from: y0, to: y1 });
-        this.extractCuts(L, x0, y0, c, y1, out);
-        this.extractCuts(R, c, y0, x1, y1, out);
-        return;
-      }
-    }
-    const ys = [...new Set(parts.map(r => Math.round((r.y + r.h) * 1000) / 1000))].sort((a, b) => a - b);
-    for (const c of ys) {
-      const T = parts.filter(r => r.y + r.h <= c + this.EPS);
-      const B = parts.filter(r => r.y >= c - this.EPS);
-      if (T.length && B.length && T.length + B.length === parts.length) {
-        out.push({ o: 'h', at: c, from: x0, to: x1 });
-        this.extractCuts(T, x0, y0, x1, c, out);
-        this.extractCuts(B, x0, c, x1, y1, out);
-        return;
-      }
-    }
-    parts.forEach(p => { p._free = true; });  // 非贯通区域，需现场判断
+  /* 当前工序步骤（已选候选切法 + 用户调整后的顺序）；无 CutPlan 时返回 [] */
+  planSteps(plan, sheetIdx) {
+    if (!plan) return [];
+    const order = CutPlan.orderFor(sheetIdx);
+    const byId = {};
+    plan.steps.forEach(s => { byId[s.id] = s; });
+    return order.map(id => byId[id]).filter(Boolean);
   },
 
-  sheetSvg(si, idx) {
+  stepTypeLabel(s) {
+    return (s.dir === 'v' ? '竖切' : '横切') + (s.trim ? `（修边·${s.wasteSide}）` : '');
+  },
+
+  producesLabel(s) {
+    return s.produces.map(p => {
+      if (p.kind === 'part') return `零件 ${p.uid}`;
+      if (p.kind === 'remnant') return `余料 ${fmtNum(p.board.w)}×${fmtNum(p.board.h)}`;
+      if (p.kind === 'blocked') return `阻塞区（${p.parts} 件→人工）`;
+      return `半成品 ${fmtNum(p.board.w)}×${fmtNum(p.board.h)}（${p.parts} 件）`;
+    }).join(' ＋ ');
+  },
+
+  sheetSvg(si, idx, plan) {
     const def = App.sheetDef(si.sheetId) || si;
     const W = +def.width, H = +def.height;
     const m = Validate.margin();
@@ -50,21 +44,7 @@ const Print = {
     parts.sort((a, b) => (a.y - b.y) || (a.x - b.x));
     parts.forEach((p, i) => { p.no = i + 1; });
 
-    const cuts = [];
-    this.extractCuts(parts, m, m, W - m, H - m, cuts);
-    // 修边
-    const trims = [];
-    if (parts.length) {
-      const minx = Math.min(...parts.map(p => p.x));
-      const miny = Math.min(...parts.map(p => p.y));
-      const maxx = Math.max(...parts.map(p => p.x + p.w));
-      const maxy = Math.max(...parts.map(p => p.y + p.h));
-      if (minx > m + this.EPS) trims.push({ o: 'v', at: minx, from: m, to: H - m, trim: '左' });
-      if (maxx < W - m - this.EPS) trims.push({ o: 'v', at: maxx, from: m, to: H - m, trim: '右' });
-      if (miny > m + this.EPS) trims.push({ o: 'h', at: miny, from: m, to: W - m, trim: '上' });
-      if (maxy < H - m - this.EPS) trims.push({ o: 'h', at: maxy, from: m, to: W - m, trim: '下' });
-    }
-    const allCuts = cuts.concat(trims);
+    const steps = this.planSteps(plan, idx);
     const fs = Math.max(W, H) / 55;  // 随板尺寸缩放的字体
 
     let s = '';
@@ -76,10 +56,18 @@ const Print = {
     s += this.dimLine(0, -pad * 0.45, W, -pad * 0.45, `${fmtNum(W)}`, fs, 'h');
     s += this.dimLine(-pad * 0.45, 0, -pad * 0.45, H, `${fmtNum(H)}`, fs, 'v');
 
-    // 切割线（蓝色虚线 + 顺序圆标）
-    allCuts.forEach((c, i) => {
-      const x1 = c.o === 'v' ? c.at : c.from, y1 = c.o === 'v' ? c.from : c.at;
-      const x2 = c.o === 'v' ? c.at : c.to, y2 = c.o === 'v' ? c.to : c.at;
+    // 阻塞区域（人工处理）：红色斜线框
+    (plan ? plan.blocked : []).forEach((b) => {
+      s += `<rect x="${b.board.x}" y="${b.board.y}" width="${b.board.w}" height="${b.board.h}" fill="#c62828" fill-opacity="0.08" stroke="#c62828" stroke-width="${fs * 0.1}" stroke-dasharray="${fs * 0.4} ${fs * 0.25}"/>`;
+      s += `<text x="${b.board.x + b.board.w / 2}" y="${b.board.y + b.board.h / 2}" font-size="${fs * 0.55}" fill="#c62828" text-anchor="middle" font-weight="bold">人工处理区（${b.uids.length} 件）</text>`;
+    });
+
+    // 切割线（蓝色虚线 + 顺序圆标）：按工序当前顺序编号，线段为各自切前子板范围
+    steps.forEach((st, i) => {
+      const x1 = st.dir === 'v' ? st.at : st.board.x;
+      const y1 = st.dir === 'v' ? st.board.y : st.at;
+      const x2 = st.dir === 'v' ? st.at : st.board.x + st.board.w;
+      const y2 = st.dir === 'v' ? st.board.y + st.board.h : st.at;
       s += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#1565c0" stroke-width="${fs * 0.1}" stroke-dasharray="${fs * 0.5} ${fs * 0.3}"/>`;
       const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
       s += `<circle cx="${mx}" cy="${my}" r="${fs * 0.62}" fill="#1565c0"/>` +
@@ -100,7 +88,7 @@ const Print = {
     });
 
     return { svg: `<svg viewBox="${-pad} ${-pad} ${W + pad * 2} ${H + pad * 2}" xmlns="http://www.w3.org/2000/svg">${s}</svg>`,
-             parts, cuts: allCuts, def, W, H };
+             parts, steps, def, W, H };
   },
 
   dimLine(x1, y1, x2, y2, text, fs, dir) {
@@ -124,28 +112,55 @@ const Print = {
     const name = esc(document.getElementById('project-name').value || '未命名项目');
     const sett = App.settings;
     const now = new Date().toLocaleString();
+    // 采用项目当前已选的裁切工序（候选切法 + 步骤顺序）
+    const cutData = (typeof CutPlan !== 'undefined') ? CutPlan.ensure() : null;
+    let totCuts = 0, totFlips = 0, totReuse = 0, totManual = 0;
+    if (cutData) {
+      lay.sheets.forEach((_, i) => {
+        const s = CutPlan.statsFor(i);
+        if (!s) return;
+        totCuts += s.cuts; totFlips += s.flips;
+        totReuse += s.reusableArea; totManual += s.manualCount;
+      });
+    }
     let body = `
       <h1>${name} — 裁切排样图</h1>
       <p class="meta">生成时间：${now} · 锯缝 ${fmtNum(sett.kerf)}mm · 板边留量 ${fmtNum(sett.margin)}mm · 零件间距 ${fmtNum(sett.spacing)}mm</p>
-      <p class="meta">利用率 ${fmtPct(st.utilization)} · 废料 ${fmtArea(st.waste)} · 约 ${st.cuts} 刀 · 用板 ${st.usedSheets}/${st.totalSheets} 张 · 已放置 ${st.placedCount} 件 / 未放置 ${st.unplacedCount} 件</p>`;
+      <p class="meta">利用率 ${fmtPct(st.utilization)} · 废料 ${fmtArea(st.waste)} · 约 ${st.cuts} 刀（估算）· 用板 ${st.usedSheets}/${st.totalSheets} 张 · 已放置 ${st.placedCount} 件 / 未放置 ${st.unplacedCount} 件</p>`;
+    if (cutData) {
+      body += `
+      <p class="meta">裁切工序：共 ${totCuts} 刀 · 翻板 ${totFlips} 次 · 可复用余料 ${fmtArea(totReuse)}${totManual ? ` · <b style="color:#c62828">人工处理 ${totManual} 项</b>` : ''}</p>`;
+    }
 
     lay.sheets.forEach((si, idx) => {
       if (!si.placements.length) return;
-      const r = this.sheetSvg(si, idx);
-      const cutRows = r.cuts.map((c, i) =>
-        `<tr><td>${i + 1}</td><td>${c.trim ? '修边（' + c.trim + '）' : (c.o === 'v' ? '竖切' : '横切')}</td>` +
-        `<td>${c.o === 'v' ? 'x = ' + fmtNum(c.at) : 'y = ' + fmtNum(c.at)}</td>` +
-        `<td>${fmtNum(c.from)} → ${fmtNum(c.to)}</td></tr>`).join('');
+      const plan = cutData ? cutData.plans[idx] : null;
+      const r = this.sheetSvg(si, idx, plan);
+      const cutRows = r.steps.map((s, i) =>
+        `<tr><td>${i + 1}</td><td>${this.stepTypeLabel(s)}</td>` +
+        `<td>${s.dir === 'v' ? 'x' : 'y'} = ${fmtNum(s.at)}</td>` +
+        `<td>${fmtNum(s.board.w)} × ${fmtNum(s.board.h)}</td>` +
+        `<td>${fmtNum(s.dir === 'v' ? s.board.h : s.board.w)}</td>` +
+        `<td>${esc(this.producesLabel(s))}</td></tr>`).join('');
       const partRows = r.parts.map(p =>
         `<tr><td>${p.no}</td><td>${esc(p.uid)}</td><td>${esc(p.name || p.partId)}</td>` +
         `<td>${fmtNum(p.w)} × ${fmtNum(p.h)}</td><td>(${fmtNum(p.x)}, ${fmtNum(p.y)})</td>` +
         `<td>${p.rotated ? '已旋转 90°' : '未旋转'}</td></tr>`).join('');
+      let manualHtml = '';
+      if (plan && plan.manual.length) {
+        const rows = plan.manual.map(mn =>
+          `<tr><td>${esc(mn.text)}</td><td>${esc(mn.uids.join('、'))}</td><td>${esc(mn.reason)}</td></tr>`).join('');
+        manualHtml = `
+          <h3 style="color:#c62828">⚠ 人工处理项（无法贯通裁切）</h3>
+          <table><thead><tr><th>区域 / 说明</th><th>涉及零件</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
       body += `
         <section class="sheet-page">
           <h2>板材 #${idx + 1}：${esc(si.sheetId)} ${esc(si.name || '')}（${fmtNum(r.W)}×${fmtNum(r.H)} mm，${si.placements.length} 件）</h2>
           ${r.svg}
-          <h3>切割顺序（图中蓝色虚线编号）</h3>
-          <table><thead><tr><th>顺序</th><th>类型</th><th>位置 (mm)</th><th>行程 (mm)</th></tr></thead><tbody>${cutRows || '<tr><td colspan="4">—</td></tr>'}</tbody></table>
+          <h3>裁切工序（切割顺序，图中蓝色编号即顺序）</h3>
+          <table><thead><tr><th>顺序</th><th>类型</th><th>切线位置 (mm)</th><th>切前子板 (mm)</th><th>行程 (mm)</th><th>产出</th></tr></thead><tbody>${cutRows || '<tr><td colspan="6">—</td></tr>'}</tbody></table>
+          ${manualHtml}
           <h3>零件清单（位置为板材左上角原点坐标）</h3>
           <table><thead><tr><th>编号</th><th>标识</th><th>名称</th><th>尺寸 (mm)</th><th>位置 (x, y)</th><th>方向</th></tr></thead><tbody>${partRows}</tbody></table>
         </section>`;
