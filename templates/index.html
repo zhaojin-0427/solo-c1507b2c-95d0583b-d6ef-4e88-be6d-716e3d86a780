@@ -20,6 +20,7 @@
       <button id="btn-redo" title="重做 (Ctrl+Y)" disabled>↪ 重做</button>
     </div>
     <div class="tb-group">
+      <button id="btn-cutplan" title="裁切工序演练：贯通切割树、逐刀播放、人工处理项">🪓 裁切工序</button>
       <button id="btn-print" class="accent" title="生成带尺寸标注与切割顺序的打印视图">🖨 打印视图</button>
     </div>
   </header>
@@ -100,7 +101,39 @@
           <button id="tb-lock" title="锁定/解锁选中零件 (L)">🔒</button>
           <button id="tb-delete" title="从板材移除选中零件 (Del)">✕</button>
         </div>
-        <div id="canvas-hint">滚轮缩放 · 拖动空白处平移 · 拖动零件移动（可跨板）· R 旋转 · L 锁定 · Del 移除</div>
+        <div id="canvas-hint">滚轮缩放 · 拖动空白处平移 · 拖动零件移动（可跨板）· R 旋转 · L 锁定 · Del 移除 · 🪓 裁切工序可逐刀演练</div>
+      </div>
+      <!-- 底部：裁切工序演练面板 -->
+      <div id="cutpanel" class="hidden">
+        <div id="cp-head">
+          <strong>🪓 裁切工序演练</strong>
+          <span id="cp-sheet-tabs"></span>
+          <span id="cp-note"></span>
+          <button id="cp-close" title="关闭面板">✕</button>
+        </div>
+        <div id="cp-body">
+          <div id="cp-side">
+            <div id="cp-stats"></div>
+            <div id="cp-controls">
+              <button id="cp-first" title="回到第一刀">⏮</button>
+              <button id="cp-prev" title="上一刀">◀</button>
+              <button id="cp-play" title="播放 / 暂停（空格）">▶</button>
+              <button id="cp-next" title="下一刀">⏭</button>
+              <button id="cp-last" title="到最后一刀">⇥</button>
+              <input id="cp-slider" type="range" min="0" max="0" value="0">
+              <span id="cp-pos"></span>
+            </div>
+            <div id="cp-current"></div>
+            <div id="cp-manual"></div>
+            <div id="cp-remnants"></div>
+          </div>
+          <div id="cp-steps-wrap">
+            <table id="cp-steps">
+              <thead><tr><th>#</th><th>切法</th><th>位置</th><th>切前子板</th><th>产出</th><th>排序/切法</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
       </div>
       <div id="statusbar"><span id="st-info">就绪</span><span id="st-pos"></span><span id="zoom-label"></span></div>
     </div>
@@ -130,6 +163,8 @@
   <script src="/static/js/api.js"></script>
   <script src="/static/js/validate.js"></script>
   <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/cutplan.js"></script>
+  <script src="/static/js/cutui.js"></script>
   <script src="/static/js/ui.js"></script>
   <script src="/static/js/print.js"></script>
   <script src="/static/js/main.js"></script>

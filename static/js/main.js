@@ -3,6 +3,7 @@ const Main = {
 
   init() {
     Canvas.init();
+    CutUI.init();
     this.bindTopbar();
     this.bindSettings();
     this.bindDefForms();
@@ -45,6 +46,7 @@ const Main = {
     document.getElementById('btn-undo').addEventListener('click', () => App.undo());
     document.getElementById('btn-redo').addEventListener('click', () => App.redo());
     document.getElementById('btn-print').addEventListener('click', () => Print.open());
+    document.getElementById('btn-cutplan').addEventListener('click', () => CutUI.toggle());
     document.getElementById('btn-new').addEventListener('click', () => {
       if (!confirm('新建项目将清空当前数据，确定？')) return;
       App.sheets = [{ id: 'S1', name: '原料板', width: 2440, height: 1220, grain: 'none', quantity: 1 }];
@@ -177,6 +179,7 @@ const Main = {
         renderAll();
         return;
       }
+      if (e.key === ' ' && App.cutOpen) { e.preventDefault(); CutUI.play(); return; }
       if (e.key === 'Delete' || e.key === 'Backspace') { this.deleteSelected(); return; }
       if (e.key === 'r' || e.key === 'R') { this.rotateSelected(); return; }
       if (e.key === 'l' || e.key === 'L') { this.toggleLock(); return; }
@@ -290,6 +293,9 @@ const Main = {
       parts: App.parts,
       layouts: App.layouts,
       active: App.active,
+      cutplan: App.cutplan,        // 裁切工序状态（切法覆盖/步骤顺序/进度）随项目保存
+      cutStates: App._cutStates,
+      cutOpen: App.cutOpen,
     };
     try {
       const res = await API.saveProject(App.projectId, name, data);
@@ -310,6 +316,10 @@ const Main = {
     App.selected = null;
     App.placeMode = null;
     App.projectId = proj.id;
+    App.cutplan = d.cutplan || null;      // 恢复裁切工序（签名一致时生效）
+    App._cutStates = d.cutStates || {};
+    App.cutOpen = !!d.cutOpen;
+    App.cutplanData = null;
     document.getElementById('project-name').value = proj.name;
     this.syncSettingsInputs();
     UI.renderSheetsTable();
@@ -331,6 +341,7 @@ function renderAll() {
   UI.renderUnplaced();
   UI.renderStatus();
   UI.updateUndoRedo();
+  CutUI.refresh();  // 面板打开时：排样变化 → 旧工序失效并重新分析 + 画布高亮
 }
 
 document.addEventListener('DOMContentLoaded', () => Main.init());

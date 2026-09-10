@@ -12,6 +12,10 @@ window.App = {
   violations: { vmap: new Map(), messages: [] },
   projectId: null,
   view: { x: -100, y: -120, w: 2800, h: 1800 },  // 画布视口（世界坐标=毫米）
+  cutOpen: false,      // 裁切工序演练面板开关
+  cutplan: null,       // 当前排样签名对应的工序状态（切法覆盖/步骤顺序/播放进度）
+  cutplanData: null,   // 工序分析结果缓存（派生数据，不随项目保存）
+  _cutStates: {},      // 各排样签名的工序状态缓存（切换方案不丢自定义）
 };
 
 App.layout = function () { return App.layouts[App.active] || null; };
