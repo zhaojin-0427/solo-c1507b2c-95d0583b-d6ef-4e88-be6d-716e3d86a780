@@ -85,19 +85,27 @@ const CutPlan = {
 
   /* 分析一张板 → { steps, remnants, blocked, manual, producerOf, partStep, kerfLoss } */
   analyzeSheet(W, H, placements, kerf, overrides) {
+    const partsByUid = {};
+    (placements || []).forEach(p => { partsByUid[p.uid] = p; });
+    const roots = [{ board: { x: 0, y: 0, w: W, h: H }, uids: Object.keys(partsByUid) }];
+    const plan = this._analyzeRoots(roots, partsByUid, kerf, overrides);
+    plan.W = W; plan.H = H; plan.kerf = kerf;
+    plan.totalParts = (placements || []).length;
+    return plan;
+  },
+
+  /* 多根分析：roots = [{board, uids}]（现场实测重建时每个未切子板各为一根）。
+     与单板分析共用同一套 build/linearize，单根时输出与原 analyzeSheet 完全一致。 */
+  _analyzeRoots(roots, partsByUid, kerf, overrides) {
     const self = this;
     const EPS = this.EPS;
     overrides = overrides || {};
-    const partsByUid = {};
-    (placements || []).forEach(p => { partsByUid[p.uid] = p; });
     const plan = {
-      W, H, kerf, totalParts: (placements || []).length,
       steps: [], remnants: [], blocked: [], manual: [],
-      producerOf: {}, partStep: {}, kerfLoss: 0, root: null,
+      producerOf: {}, partStep: {}, kerfLoss: 0, root: null, roots: [],
     };
-    const uids0 = Object.keys(partsByUid);
-    if (!uids0.length) return plan;
     let nodeSeq = 0;
+    let stepSeq = 0;
 
     function build(board, uids) {
       const node = {
@@ -142,11 +150,7 @@ const CutPlan = {
       return node;
     }
 
-    const root = build({ x: 0, y: 0, w: W, h: H }, uids0);
-    plan.root = root;
-
     // 线性化：DFS 先序（父切先于子切），形成默认步骤序列
-    let stepSeq = 0;
     function linearize(node) {
       if (!node.cut) {
         if (node.leafKind === 'remnant') {
@@ -189,7 +193,22 @@ const CutPlan = {
       plan.steps.push(step);
       node.children.forEach(linearize);
     }
-    linearize(root);
+
+    roots.forEach((r) => {
+      if (!r.uids.length) {
+        if (r.board.w > EPS && r.board.h > EPS) {
+          plan.remnants.push({
+            x: r.board.x, y: r.board.y, w: r.board.w, h: r.board.h,
+            reusable: Math.min(r.board.w, r.board.h) >= self.REUSE_MIN - EPS,
+          });
+        }
+        return;
+      }
+      const root = build(r.board, r.uids);
+      plan.roots.push(root);
+      if (!plan.root) plan.root = root;
+      linearize(root);
+    });
 
     plan.manual = plan.blocked.map(b => ({
       text: `区域 ${fmtNum(b.board.w)}×${fmtNum(b.board.h)}` +
@@ -244,8 +263,13 @@ const CutPlan = {
       App.cutplanData = null;
     }
     if (!App.cutplanData) {
-      const plans = lay.sheets.map((si, idx) =>
-        this.analyzeSheetResolved(si, App.cutplan.overrides[String(idx)] || {}));
+      const plans = lay.sheets.map((si, idx) => {
+        // 已有现场确认记录 → 按实测尺寸重建（冻结已确认刀序，重算未执行步骤）
+        if (typeof FieldRec !== 'undefined' && FieldRec.hasRecords(idx)) {
+          return FieldRec.rebuild(idx);
+        }
+        return this.analyzeSheetResolved(si, App.cutplan.overrides[String(idx)] || {});
+      });
       App.cutplanData = { sig, plans };
     }
     return App.cutplanData;
@@ -295,14 +319,19 @@ const CutPlan = {
       manualParts: plan.blocked.reduce((t, b) => t + b.uids.length, 0),
       partsOut: Object.keys(plan.partStep).length,
       totalParts: plan.totalParts,
+      confirmed: plan.confirmedCount || 0,                 // 已确认（现场锁定）刀数
+      shortfall: (plan.shortfall || []).length,            // 补料零件数
+      shortfallParts: plan.shortfall || [],
     };
   },
 
-  /* 相邻两步能否交换：后一步的子板不是由前一步产生（无依赖）即可 */
+  /* 相邻两步能否交换：后一步的子板不是由前一步产生（无依赖）即可；
+     已现场确认的刀序（前 confirmedCount 步）锁定，不得换序 */
   canSwap(sheetIdx, i) {
     const plan = App.cutplanData.plans[sheetIdx];
     const order = this.orderFor(sheetIdx);
     if (i < 0 || i >= order.length - 1) return false;
+    if (i < (plan.confirmedCount || 0)) return false;      // 触及已确认刀序
     const byId = {};
     plan.steps.forEach(s => { byId[s.id] = s; });
     const a = byId[order[i]], b = byId[order[i + 1]];
@@ -319,13 +348,23 @@ const CutPlan = {
     return true;
   },
 
-  /* 切换某子板的候选切法 → 重分析该板，自定义顺序与进度重置 */
+  /* 切换某子板的候选切法 → 重分析该板，自定义顺序与进度重置。
+     已现场确认的切法锁定，不得改写；有现场记录时走实测重建。 */
   setCandidate(sheetIdx, nodeKey, candIdx) {
     if (!App.cutplanData) return;
     const st = App.cutplan;
     const key = String(sheetIdx);
+    const plan = App.cutplanData.plans[sheetIdx];
+    if (plan && plan.steps &&
+        plan.steps.some(s => s.confirmed && s.nodeKey === nodeKey)) return;  // 已确认刀序锁定
     st.overrides[key] = st.overrides[key] || {};
     st.overrides[key][nodeKey] = candIdx;
+    if (typeof FieldRec !== 'undefined' && FieldRec.hasRecords(sheetIdx)) {
+      FieldRec.rebuildInto(sheetIdx);
+      delete st.orders[key];
+      st.cursors[key] = FieldRec.confirmedCount(sheetIdx);
+      return;
+    }
     const lay = App.layout();
     App.cutplanData.plans[sheetIdx] =
       this.analyzeSheetResolved(lay.sheets[sheetIdx], st.overrides[key]);
