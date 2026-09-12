@@ -2,9 +2,10 @@
 window.App = {
   settings: { kerf: 3, margin: 5, spacing: 2 },
   sheets: [],        // 原料板定义 [{id,name,width,height,grain,quantity,grainPeriod,grainBase:{x,y}}]
-  parts: [],         // 零件定义 [{id,name,width,height,quantity,rotatable,grain,faceReq,allowGrade,allowZones}]
+  parts: [],         // 零件定义 [{id,name,width(成品),height(成品),quantity,rotatable,grain,faceReq,allowGrade,allowZones,edges:{top,right,bottom,left:{kind,material,thickness,trim}}}]
   defects: {},       // 板面缺陷（随板材实例）：{ 'S1#0': [{id,type,grade,face,clearance,shape,points:[{x,y}]}] }
   grainGroups: [],   // 拼纹对花组定义 [{id,dir:'h'|'v',productGap,tolerance,sameSheet,members:[uid]}]
+  edgingOrder: { mode: 'shortFirst', orders: {} },  // 封边工序：批次排序模式与手动次序
   layouts: [],       // 服务端返回的多个方案
   active: 0,         // 当前方案下标
   selected: null,    // 选中零件 uid
@@ -24,9 +25,35 @@ window.App = {
 
 App.layout = function () { return App.layouts[App.active] || null; };
 
-App.partDef = function (partId) { return App.parts.find(p => p.id === partId) || null; };
+App.partDef = function (partId) {
+  const p = App.parts.find(x => x.id === partId) || null;
+  if (p && typeof Edging !== 'undefined') Edging.ensureEdges(p);
+  return p;
+};
 App.sheetDef = function (sheetId) { return App.sheets.find(s => s.id === sheetId) || null; };
 App.uidPart = function (uid) { return App.partDef(String(uid).split('#')[0]); };
+
+/* 零件定义 → 毛坯尺寸（按放置方向），排样/手放/锁定均使用毛坯外廓 */
+App.blankDef = function (pd, rotated) {
+  if (typeof Edging === 'undefined') return { w: +pd.width, h: +pd.height };
+  const g = Edging.productGeom(pd, !!rotated);
+  return { w: g.blankW, h: g.blankH };
+};
+
+/* 当前方案封边批次（渲染缓存，按布局签名失效） */
+App.edgingBatches = function () {
+  const lay = this.layout();
+  if (!lay || typeof Edging === 'undefined') return [];
+  const sig = lay.sheets.map(s => s.placements.map(p =>
+    [p.uid, Math.round(p.x), Math.round(p.y), p.rotated].join(',')).join('|'));
+  const partsSig = this.parts.map(p => JSON.stringify(p.edges)).join('|');
+  const key = sig + '#' + partsSig + '#' + (this.edgingOrder ? this.edgingOrder.mode : '');
+  if (this._batchKey === key) return this._batchCache || [];
+  this._batchKey = key;
+  this._batchCache = Edging.batches(lay, (this.edgingOrder || {}).mode,
+    (this.edgingOrder || {}).orders);
+  return this._batchCache;
+};
 
 /* ---- 拼纹对花组 ---- */
 App.groupOf = function (uid) {
@@ -92,6 +119,7 @@ App.snapshot = function () {
     layouts: App.layouts, active: App.active,
     defects: App.defects, parts: App.parts,
     grainGroups: App.grainGroups,
+    edgingOrder: App.edgingOrder,
   });
 };
 App.restore = function (snap) {
@@ -100,8 +128,9 @@ App.restore = function (snap) {
   App.active = Math.min(o.active, o.layouts.length - 1);
   if (App.active < 0) App.active = 0;
   App.defects = o.defects || {};
-  if (o.parts) App.parts = o.parts;   // 容许区编辑也入栈
+  if (o.parts) App.parts = o.parts;   // 容许区/封边编辑也入栈
   if (o.grainGroups) App.grainGroups = o.grainGroups;
+  if (o.edgingOrder) App.edgingOrder = o.edgingOrder;
   App.selectedDefect = null;
 };
 App.pushHistory = function () {
@@ -197,7 +226,7 @@ function recomputeLayoutStats(lay) {
     const W = +def.width, H = +def.height;
     const ps = si.placements;
     placedCount += ps.length;
-    ps.forEach(p => { placedArea += p.w * p.h; });
+    ps.forEach(p => { placedArea += p.w * p.h; });  // p.w/h 为毛坯外廓
     const defects = (typeof Defects !== 'undefined')
       ? App.defectsOn(si.sheetId, si.instance) : [];
     ps.forEach((p) => {

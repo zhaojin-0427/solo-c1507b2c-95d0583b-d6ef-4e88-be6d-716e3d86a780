@@ -21,6 +21,7 @@
     </div>
     <div class="tb-group">
       <button id="btn-cutplan" title="裁切工序演练：贯通切割树、逐刀播放、人工处理项">🪓 裁切工序</button>
+      <button id="btn-edging" title="封边工序：按材料/厚度合并批次、封边用量统计与换序">▰ 封边工序</button>
       <button id="btn-print" class="accent" title="生成带尺寸标注与切割顺序的打印视图">🖨 打印视图</button>
     </div>
   </header>
@@ -62,9 +63,9 @@
       </section>
 
       <section class="panel">
-        <h2>零件</h2>
+        <h2>零件 <span class="hint" style="font-weight:normal">（宽高为成品尺寸，封边补偿在毛坯计算中扣除）</span></h2>
         <table class="def-table" id="parts-table">
-          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>可旋转</th><th>纹理</th><th>正反面/容缺</th><th></th></tr></thead>
+          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>可旋转</th><th>纹理</th><th>封边</th><th>正反面/容缺</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="add-row">
@@ -191,6 +192,7 @@
   <script src="/static/js/state.js"></script>
   <script src="/static/js/api.js"></script>
   <script src="/static/js/defects.js"></script>
+  <script src="/static/js/edging.js"></script>
   <script src="/static/js/grain.js"></script>
   <script src="/static/js/validate.js"></script>
   <script src="/static/js/canvas.js"></script>
@@ -198,6 +200,7 @@
   <script src="/static/js/cutplan.js"></script>
   <script src="/static/js/cutui.js"></script>
   <script src="/static/js/grainui.js"></script>
+  <script src="/static/js/edgeui.js"></script>
   <script src="/static/js/ui.js"></script>
   <script src="/static/js/print.js"></script>
   <script src="/static/js/main.js"></script>

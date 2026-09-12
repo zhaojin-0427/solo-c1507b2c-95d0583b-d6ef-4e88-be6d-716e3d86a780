@@ -19,6 +19,13 @@
 纹理轴与拼链同向 → 比较前缘相位推进（锯缝/成品间隙/跨板基点，周期包裹）。
 组按原子单位排样：组员次序、同带、相位容差与板边/锯缝/方向/缺陷同时生效；
 整组失败时各成员进入未放置清单并写明触发的限制。
+
+封边尺寸补偿：零件 width/height 一律视为【成品尺寸】。四边（上/右/下/左，
+  零件定义坐标系）可标 kind='exposed'（外露）/'join'（拼接）/'none'（不处理），
+  外露边填写封边材料 material、厚度 thickness 与修边余量 trim。
+  毛坯 = 成品 − 两侧封边厚度 + 两侧修边余量（仅实际封边的边参与）；
+  排样、缺陷避让与裁切树全部使用毛坯外廓；拼纹接缝按【成品边】与成品间隙计算。
+  零件旋转 90° 后边属性随之外形换向（canonical 上 → visual 右，依此类推）。
 """
 from __future__ import annotations
 
@@ -30,6 +37,147 @@ MAX_SHEET_INSTANCES = 40   # 展开数量后的板材实例上限
 
 DEFECT_TYPES = {'knot': '节疤', 'crack': '裂纹', 'scratch': '划痕'}
 DEFECT_FACES = {'front': '正面', 'back': '反面', 'both': '双面'}
+
+# ---------------------------------------------------------------------------
+# 封边尺寸补偿（四边模型）
+# 边顺序（canonical，零件定义坐标系）：top / right / bottom / left
+# kind: exposed=外露（须封边） join=拼接（不得封边） none=不处理（不封边）
+# 毛坯：blankW = 成品宽 − (左封边厚+右封边厚) + (左修边余量+右修边余量)
+#       （仅实际封边的外露边参与扣除/加余量），高度同理。
+# ---------------------------------------------------------------------------
+EDGE_KEYS = ('top', 'right', 'bottom', 'left')
+EDGE_LABELS = {'top': '上边', 'right': '右边', 'bottom': '下边', 'left': '左边'}
+EDGE_KINDS = {'exposed': '外露', 'join': '拼接', 'none': '不处理'}
+
+
+def _edge_raw(p, k):
+    """读取零件某条 canonical 边的封边定义（旧项目/旧数据缺省为不处理）。"""
+    edges = p.get('edges') or {}
+    e = edges.get(k)
+    if not isinstance(e, dict):
+        e = {}
+    kind = e.get('kind')
+    return {
+        'kind': kind if kind in EDGE_KINDS else 'none',
+        'material': (e.get('material') or '').strip(),
+        'thickness': max(0.0, _f(e.get('thickness'), 0)),
+        'trim': max(0.0, _f(e.get('trim'), 0)),
+    }
+
+
+def edge_banded(e):
+    """该边是否实际封边：外露 + 封边厚度为正。"""
+    return e['kind'] == 'exposed' and e['thickness'] > EPS
+
+
+def normal_edges(p):
+    """零件定义坐标系四边 [{key,kind,material,thickness,trim,banded}]。"""
+    out = []
+    for k in EDGE_KEYS:
+        e = _edge_raw(p, k)
+        e['key'] = k
+        e['banded'] = edge_banded(e)
+        out.append(e)
+    return out
+
+
+def blank_dims(p):
+    """由成品尺寸与四边封边定义计算毛坯 (w, h) 及补偿量。"""
+    pw, ph = _f(p.get('width')), _f(p.get('height'))
+    e = {k: _edge_raw(p, k) for k in EDGE_KEYS}
+    comp_left = sum((-x['thickness'] + x['trim']) for x in (e['left'],) if edge_banded(x))
+    comp_right = sum((-x['thickness'] + x['trim']) for x in (e['right'],) if edge_banded(x))
+    comp_top = sum((-x['thickness'] + x['trim']) for x in (e['top'],) if edge_banded(x))
+    comp_bottom = sum((-x['thickness'] + x['trim']) for x in (e['bottom'],) if edge_banded(x))
+    bw = pw + comp_left + comp_right
+    bh = ph + comp_top + comp_bottom
+    comp = {'left': comp_left, 'right': comp_right, 'top': comp_top, 'bottom': comp_bottom}
+    return bw, bh, comp
+
+
+def visual_edges(p, rotated=False):
+    """外形四边（按毛坯外廓顺时针 top,right,bottom,left）；旋转后边属性换向。
+
+    视觉顺时针 90°（与画布一致，y 向下）：canonical top → visual right，
+    right → bottom，bottom → left，left → top。
+    """
+    e = {k: _edge_raw(p, k) for k in EDGE_KEYS}
+    if not rotated:
+        order = ('top', 'right', 'bottom', 'left')
+    else:
+        order = ('right', 'bottom', 'left', 'top')
+    out = []
+    for vk, ck in zip(EDGE_KEYS, order):
+        d = dict(e[ck])
+        d['key'] = vk
+        d['canonical'] = ck
+        d['banded'] = edge_banded(d)
+        out.append(d)
+    return out
+
+
+def product_geom(p, rotated=False):
+    """成品在毛坯外形坐标中的几何 {w,h,ox,oy}（毛坯局部坐标，可为负=封边条悬出）。
+
+    约定（canonical 毛坯局部坐标，原点在成品本体左上角）：
+      未旋转：成品 x∈[comp.left, bw+comp.right]、y∈[comp.top, bh+comp.bottom]；
+      旋转 90°（视觉顺时针）：canonical 左边→visual 上边，成品占据
+      visual [0,ph]×[0,pw]，封边补偿悬出段落入 visual 右/下边。
+    """
+    pw, ph = _f(p.get('width')), _f(p.get('height'))
+    bw, bh, comp = blank_dims(p)
+    if not rotated:
+        return {'w': pw, 'h': ph, 'ox': comp['left'], 'oy': comp['top'],
+                'blankW': bw, 'blankH': bh, 'comp': comp}
+    return {'w': ph, 'h': pw, 'ox': 0.0, 'oy': 0.0,
+            'blankW': bh, 'blankH': bw, 'comp': comp}
+
+
+def instance_product(inst, rotated=False):
+    """展开实例（已含 comp/productW/productH）→ 放置方向上的成品几何。"""
+    if not rotated:
+        return {'w': inst['productW'], 'h': inst['productH'],
+                'ox': inst['comp']['left'], 'oy': inst['comp']['top']}
+    return {'w': inst['productH'], 'h': inst['productW'], 'ox': 0.0, 'oy': 0.0}
+
+
+def prect(rec):
+    """放置记录 → 成品外廓绝对/可用坐标矩形 {x,y,w,h}；无补偿数据时退化为毛坯矩形。"""
+    ox = _f((rec.get('product') or {}).get('ox'))
+    oy = _f((rec.get('product') or {}).get('oy'))
+    w = (rec.get('product') or {}).get('w')
+    h = (rec.get('product') or {}).get('h')
+    return {'x': rec['x'] + ox, 'y': rec['y'] + oy,
+            'w': (_f(w) if w else rec['w']),
+            'h': (_f(h) if h else rec['h'])}
+
+
+def part_edge_issues(p):
+    """定义级工序核对：毛坯非正 / 外露边未封 / 拼接边误封。
+    返回 [{code, edge, msg}]，edge 为 canonical 边名。"""
+    issues = []
+    name = p.get('name') or p.get('id')
+    bw, bh, _ = blank_dims(p)
+    if bw <= EPS or bh <= EPS:
+        issues.append({'code': 'blanknonpositive', 'edge': None,
+                       'msg': f"{p.get('id')}（{name}）封边补偿后毛坯尺寸为 "
+                              f"{bw:g}×{bh:g}mm，非正值无法下料（请减小封边厚度或修改成品尺寸）"})
+    for k in EDGE_KEYS:
+        e = _edge_raw(p, k)
+        lab = EDGE_LABELS[k]
+        if e['kind'] == 'exposed' and not edge_banded(e):
+            why = '未填写封边厚度' if e['thickness'] <= EPS else ''
+            if not e['material']:
+                why = (why + '、' if why else '') + '未填写封边材料'
+            issues.append({'code': 'exposedunbanded', 'edge': k,
+                           'msg': f"{p.get('id')}（{name}）{lab}标为外露但{why or '未封边'}，"
+                                  f"外露边必须封边"})
+        if e['kind'] == 'join' and e['thickness'] > EPS:
+            issues.append({'code': 'joinbanded', 'edge': k,
+                           'msg': f"{p.get('id')}（{name}）{lab}标为拼接却封了 "
+                                  f"{e['thickness']:g}mm 厚的边（材料 {e['material'] or '未填'}），"
+                                  f"拼接边不得封边"})
+    return issues
 
 
 def _f(v, default=0.0):
@@ -208,11 +356,13 @@ def _seg_cross_proper(p1, p2, p3, p4):
            ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS))
 
 
-def transform_zone(zone, x, y, w, h, rotated, pw, ph):
+def transform_zone(zone, x, y, w, h, rotated, pw, ph, ox=0.0, oy=0.0):
     """零件局部容许区多边形 → 放置后绝对/可用坐标。
 
     与前端一致：旋转 90°（视觉顺时针，y 向下）映射 (lx,ly) → (x + ph - ly, y + lx)，
-    旋转后外接矩形为 ph × pw。zone 结构为 {'points': [(lx,ly), ...]}。
+    旋转后外接矩形为 ph × pw（旋转时成品占据毛坯 [0,0] 角，ox=oy=0）；
+    未旋转时成品在毛坯内偏移 (ox, oy)（封边补偿，可为负=封边条悬出毛坯）。
+    zone 结构为 {'points': [(lx,ly), ...]}，坐标为成品局部坐标。
     """
     out = []
     for p in (zone or {}).get('points') or []:
@@ -220,7 +370,7 @@ def transform_zone(zone, x, y, w, h, rotated, pw, ph):
         if rotated:
             out.append((x + ph - ly, y + lx))
         else:
-            out.append((x + lx, y + ly))
+            out.append((x + ox + lx, y + oy + ly))
     return out
 
 
@@ -234,9 +384,11 @@ def defect_inside_allowzone(dpts, x, y, w, h, inst, rotated):
         if not (x - EPS <= px <= x + w + EPS and y - EPS <= py <= y + h + EPS):
             return False
     pw, ph = inst['w'], inst['h']
+    prod = instance_product(inst, rotated)
     zones = inst.get('allowZones') or []
     for zone in zones:
-        zt = transform_zone(zone, x, y, w, h, rotated, pw, ph)
+        zt = transform_zone(zone, x, y, w, h, rotated, pw, ph,
+                            prod['ox'], prod['oy'])
         if len(zt) < 3:
             continue
         if all(point_in_poly(px, py, zt) for px, py in pts):
@@ -291,17 +443,26 @@ def expanded_defect_area(d, margin, uw, uh):
 
 
 def expand_parts(parts):
-    """把零件定义按数量展开为实例列表，uid 形如 P1#3。"""
+    """把零件定义按数量展开为实例列表，uid 形如 P1#3。
+
+    成品尺寸 → 毛坯：w/h 存毛坯外廓（排样/缺陷/裁切树使用），成品几何经
+    productGeom 按放置方向换算后挂在放置记录上（拼纹接缝使用）。
+    """
     insts = []
     for p in parts or []:
+        bw, bh, comp = blank_dims(p)
+        edges = {k: _edge_raw(p, k) for k in EDGE_KEYS}
         qty = max(0, min(int(_f(p.get('quantity'), 1)), 500))
         for i in range(qty):
             insts.append({
                 'uid': f"{p.get('id')}#{i + 1}",
                 'partId': p.get('id'),
                 'name': p.get('name') or p.get('id'),
-                'w': _f(p.get('width')),
-                'h': _f(p.get('height')),
+                'w': bw, 'h': bh,                     # 毛坯外廓
+                'productW': _f(p.get('width')),       # 成品（定义方向）
+                'productH': _f(p.get('height')),
+                'comp': comp,
+                'edges': edges,
                 'rotatable': bool(p.get('rotatable', True)),
                 'grain': p.get('grain', 'none'),
                 'faceReq': p.get('faceReq', 'any'),          # any/front/back/both
@@ -433,10 +594,13 @@ def evaluate_seam(prev, cur, axis, product_gap, s_prev, s_cur, gap_sheet=None):
       横纹（纹理轴沿拼缝）：同带时比较带向基点相位；错带量直接计入错花量。
     """
     if gap_sheet is None:
+        # 拼纹接缝按【成品边】计算：先把毛坯坐标换算为成品外廓
+        pp, cc = prect(prev), prect(cur)
         if axis == 'x':
-            gap_sheet = cur['x'] - (prev['x'] + prev['w'])
+            gap_sheet = cc['x'] - (pp['x'] + pp['w'])
         else:
-            gap_sheet = cur['y'] - (prev['y'] + prev['h'])
+            gap_sheet = cc['y'] - (pp['y'] + pp['h'])
+        prev, cur = pp, cc
     Tp = max(0.0, s_prev.get('grainPeriod', 0) or 0)
     Tc = max(0.0, s_cur.get('grainPeriod', 0) or 0)
     bp = s_prev.get('grainBase') or {'x': 0.0, 'y': 0.0}
@@ -722,14 +886,17 @@ def _unplaced_reason(inst, states, settings):
 
 
 def _group_geom(inst, st):
-    """成员在候选板上的摆放 (w,h,rot)；与纹理/旋转约束不兼容或超限返回 None。"""
+    """成员在候选板上的摆放 (w,h,rot,prod)；与纹理/旋转约束不兼容或超限返回 None。
+
+    w/h 为毛坯外廓，prod 为该方向上的成品几何 {w,h,ox,oy}（拼纹接缝使用成品边）。
+    """
     oris = orientations(inst, st['def'].get('grain', 'none'))
     if not oris:
         return None
     w, h, rot = oris[0]   # 优先不旋转（horizontal 本就不旋转，vertical 本就旋转）
     if w > st['uw'] + EPS or h > st['uh'] + EPS:
         return None
-    return w, h, rot
+    return w, h, rot, instance_product(inst, rot)
 
 
 def _grain_axis(st, chain):
@@ -740,6 +907,49 @@ def _grain_axis(st, chain):
     if g == 'vertical':
         return 'y'
     return chain
+
+
+def _facing_side(chain, role, rotated=False):
+    """拼缝两侧成员沿拼链相对的【canonical】边名。
+
+    role='trail' 为前一成员朝拼链正向的边，'lead' 为后一成员朝拼链反向的边；
+    rotated 为该成员外形是否旋转 90°（边属性随外形换向）。
+    """
+    # 视觉边（沿外廓）：x 链 → 前导件右边/后续件左边；y 链 → 底边/上边
+    vis_trail = 'right' if chain == 'x' else 'bottom'
+    vis_lead = 'left' if chain == 'x' else 'top'
+    vis = vis_trail if role == 'trail' else vis_lead
+    if not rotated:
+        return vis
+    # 旋转后 visual→canonical：top→right, right→bottom, bottom→left, left→top
+    inv = {'top': 'right', 'right': 'bottom', 'bottom': 'left', 'left': 'top'}
+    return inv[vis]
+
+
+def _edge_comp_visual(inst, side_vis, rotated=False):
+    """实例外形某视觉边上的封边补偿量 = -厚度 + 修边余量（未封边为 0）。"""
+    if rotated:
+        # 旋转后 canonical top→visual right、right→bottom、bottom→left、left→top；
+        # 故 visual→canonical 取反向映射
+        side_vis = {'top': 'right', 'right': 'bottom', 'bottom': 'left',
+                    'left': 'top'}[side_vis]
+    e = inst['edges'].get(side_vis)
+    return (-e['thickness'] + e['trim']) if e and edge_banded(e) else 0.0
+
+
+def _lead_comp(inst, chain, rotated=False):
+    """沿拼链负向边（x=左 / y=上）补偿。"""
+    return _edge_comp_visual(inst, 'left' if chain == 'x' else 'top', rotated)
+
+
+def _trail_comp(inst, chain, rotated=False):
+    """沿拼链正向边（x=右 / y=下）补偿。"""
+    return _edge_comp_visual(inst, 'right' if chain == 'x' else 'bottom', rotated)
+
+
+def _cross_lead_comp(inst, chain, rotated=False):
+    """与拼链垂直的负向边（横拼 y=上 / 纵拼 x=左）补偿，用于带对齐。"""
+    return _edge_comp_visual(inst, 'top' if chain == 'x' else 'left', rotated)
 
 
 def _rect_ok(st, x, y, w, h, inst, gap, extra):
@@ -753,12 +963,14 @@ def _rect_ok(st, x, y, w, h, inst, gap, extra):
     return True
 
 
-def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin, inst=None):
-    """沿拼链生成候选链坐标（可用区域坐标），兼顾贴边/绕障与对花周期。
+def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin,
+                 inst=None, geom=None, prev_geom=None):
+    """沿拼链生成候选链坐标（毛坯原点，可用区域坐标），兼顾贴边/绕障与对花周期。
 
-    返回去重升序的候选列表。相位合格的理想间距为 pgap + k·T（同板，
-    错花量 = wrap(板上净距-成品间隙)）；另加入障碍右缘+gap 与缺陷外扩角点用于绕障。
+    相位合格的理想【毛坯】间距 = pgap + k·T − 前件正向边补偿 + 后件负向边补偿
+    （同板错花量 = wrap(成品净距−成品间隙)）；另加入障碍右缘+gap 与缺陷角点绕障。
     """
+    c_lead = _lead_comp(inst, chain, geom[2]) if (inst and geom) else 0.0
     if prev is None:
         cands = {0.0}
         for r in st['placed'] + extra:
@@ -768,37 +980,56 @@ def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin, 
             for cx, cy in _defect_candidates(inst, st['defects']):
                 cands.add(max(0.0, (cx if chain == 'x' else cy)))
         return sorted(cands)
+    # 前一记录毛坯前缘
     edge = (prev['x'] + prev['w']) if chain == 'x' else (prev['y'] + prev['h'])
+    p_trail = (prev.get('trailComp') if isinstance(prev, dict) else None)
+    if p_trail is None:
+        p_trail = 0.0
+    min_blank_gap = max(gap, pgap - p_trail + c_lead)
     cands = set()
-    # 对花理想位置：净距 = pgap + k·T（k=0,1,2,…）
+    # 对花理想位置：毛坯净距 = pgap + k·T − trailComp + leadComp（物理冲突交给 _rect_ok）
     if period and period > EPS:
         k = 0
-        while edge + pgap + k * period <= st['uw' if chain == 'x' else 'uh'] + EPS and k < 200:
-            c = edge + pgap + k * period
+        U = st['uw' if chain == 'x' else 'uh']
+        while edge + pgap - p_trail + c_lead + k * period <= U + EPS and k < 200:
+            c = edge + pgap - p_trail + c_lead + k * period
             if c >= start - EPS:
                 cands.add(c)
             k += 1
     # 无周期（横纹横排等相位沿拼缝的情形）或绕障：最小净距
-    cands.add(max(edge + gap, start))
+    cands.add(max(edge + min_blank_gap, start))
     for r in st['placed'] + extra:
         e2 = (r['x'] + r['w']) if chain == 'x' else (r['y'] + r['h'])
         c = e2 + gap
-        if c >= edge + gap - EPS:
+        if c >= edge + min_blank_gap - EPS:
             cands.add(c)
     # 缺陷外扩角点/顶点：沿链方向绕行位置
     if inst is not None:
         for cx, cy in _defect_candidates(inst, st['defects']):
             c = cx if chain == 'x' else cy
-            if c >= edge + gap - EPS:
+            if c >= edge + min_blank_gap - EPS:
                 cands.add(max(0.0, c))
-    return sorted(c for c in cands if c >= edge + gap - EPS)
+    # k=0 理想点（成品净距 = 成品间隙）若小于最小物理间距则丢弃；
+    # k≥1 的周期点原样保留（_rect_ok 负责几何可行性），故用 pgap+T 为过滤下界。
+    lower = edge + min_blank_gap - EPS
+    if period and period > EPS and pgap - p_trail + c_lead < min_blank_gap - EPS:
+        lower = edge + pgap - p_trail + c_lead + period - EPS
+    return sorted(c for c in cands if c >= lower)
 
 
-def _band_coords(chain, st, extra, gap, prev, first_band, inst=None):
-    """候选带坐标（与拼链垂直方向）：承接上一成员的带，或新带贴边/绕障/绕缺陷。"""
+def _band_coords(chain, st, extra, gap, prev, first_band, inst=None, geom=None):
+    """候选带【毛坯原点】坐标（与拼链垂直方向）：承接前一成员成品带，或贴边/绕障。
+
+    带对齐以【成品边】为准：后续成员毛坯原点 = 前一成员成品起边 − 本件成品内偏移，
+    使两侧成品在同一坐标线上；首成员枚举 0 与各障碍/缺陷外缘起点。
+    """
     if prev is not None:
-        band = prev['y'] if chain == 'x' else prev['x']
-        cands = {band}
+        prod = geom[3] if geom else {'oy': 0.0, 'ox': 0.0}
+        off = prod['oy'] if chain == 'x' else prod['ox']
+        prev_prod_lead = (prev.get('crossLead') if isinstance(prev, dict) else None)
+        band0 = (prev['y'] if chain == 'x' else prev['x']) if prev_prod_lead is None \
+            else prev_prod_lead
+        cands = {band0 - off}
         # 同带被占/被缺陷挡时，枚举带起点：障碍外缘 +gap
         for r in st['placed'] + extra:
             e2 = (r['y'] + r['h']) if chain == 'x' else (r['x'] + r['w'])
@@ -808,7 +1039,9 @@ def _band_coords(chain, st, extra, gap, prev, first_band, inst=None):
                 cands.add(max(0.0, (cy if chain == 'x' else cx)))
         return sorted(cands)
     if first_band is not None:
-        return [first_band]
+        prod = geom[3] if geom else {'oy': 0.0, 'ox': 0.0}
+        off = prod['oy'] if chain == 'x' else prod['ox']
+        return [first_band - off]
     cands = {0.0}
     for r in st['placed'] + extra:
         e2 = (r['y'] + r['h']) if chain == 'x' else (r['x'] + r['w'])
@@ -816,16 +1049,41 @@ def _band_coords(chain, st, extra, gap, prev, first_band, inst=None):
     if inst is not None:
         for cx, cy in _defect_candidates(inst, st['defects']):
             cands.add(max(0.0, (cy if chain == 'x' else cx)))
-    return sorted(cands)
+    # 0 带优先（整组通常贴可用区边成排/成列），其余升序
+    ordered = sorted(cands)
+    return ([0.0] if 0.0 in ordered else []) + [c for c in ordered if abs(c) > EPS]
+
+
+def _record_product(rec, chain):
+    """组内放置记录补充成品几何与拼链补偿字段（供接缝与带对齐）。"""
+    geom = rec.get('_geom')
+    if geom:
+        w, h, rot, prod = geom
+        rec['w'], rec['h'], rec['rot'] = w, h, rot
+        rec['product'] = prod
+        rec['trailComp'] = _trail_comp(rec['inst'], chain, rot)
+        rec['leadComp'] = _lead_comp(rec['inst'], chain, rot)
+        rec['crossLead'] = (rec['y'] + prod['oy']) if chain == 'x' \
+            else (rec['x'] + prod['ox'])
+        rec['_chain'] = chain
+    return rec
 
 
 def _seam_for_records(prev, cur, chain, group, st_prev, st_cur, margin, product_gap=None):
-    """由两条放置记录（可用区域坐标）构造绝对坐标记录并评估接缝。"""
+    """由两条放置记录（可用区域坐标）构造绝对坐标记录并评估接缝。
+
+    接缝按成品边计算：记录携带 product {w,h,ox,oy} 时自动换算为成品外廓。
+    """
     if product_gap is None:
         product_gap = group['productGap']
-    p_abs = {'x': prev['x'] + margin, 'y': prev['y'] + margin, 'w': prev['w'], 'h': prev['h']}
-    c_abs = {'x': cur['x'] + margin, 'y': cur['y'] + margin, 'w': cur['w'], 'h': cur['h']}
-    return evaluate_seam(p_abs, c_abs, chain, product_gap,
+
+    def to_abs(r):
+        a = {'x': r['x'] + margin, 'y': r['y'] + margin, 'w': r['w'], 'h': r['h']}
+        if r.get('product'):
+            a['product'] = r['product']
+        return a
+
+    return evaluate_seam(to_abs(prev), to_abs(cur), chain, product_gap,
                          st_prev['def'], st_cur['def'])
 
 
@@ -870,12 +1128,13 @@ def place_group(group, insts_by_uid, states, gap, margin):
             blockers[inst['uid']] = reasons
         return {'ok': False, 'blockers': blockers, 'why': 'compat'}
 
-    # 带向等尺寸检查（横拼等高，纵拼等宽）；不一致直接失败
+    # 带向等尺寸检查（横拼成品等高，纵拼成品等宽）；不一致直接失败。
     for st in compatible[:1]:
         geoms = [_group_geom(i, st) for i in members]
-        cross_sizes = [(g[1] if chain == 'x' else g[0]) for g in geoms]
-        if max(cross_sizes) - min(cross_sizes) > EPS:
-            why = '成员' + ('高度' if chain == 'x' else '宽度') + '不一致，无法同带拼合'
+        prod_cross = [((g[3])['h'] if chain == 'x' else (g[3])['w']) for g in geoms]
+        if max(prod_cross) - min(prod_cross) > EPS:
+            why = '成员成品' + ('高度' if chain == 'x' else '宽度') + \
+                  '不一致，无法同带拼合（拼纹接缝按成品边对齐）'
             for inst in members:
                 blockers[inst['uid']] = [why]
             return {'ok': False, 'blockers': blockers, 'why': 'band'}
@@ -888,8 +1147,15 @@ def place_group(group, insts_by_uid, states, gap, margin):
         longitudinal = (gax == chain)
         if longitudinal and T <= EPS and (st['def'].get('grain') or 'none') != 'none':
             return None  # 有纹理却未记周期：沿纹理方向无法保证对花
-        cross_size = max((g[1] if chain == 'x' else g[0]) for g in geoms)
-        pitch_gap = max(gap, pgap)
+        cross_size = 0.0
+        for g in geoms:
+            w, h, rot, prod = g
+            bh = h if chain == 'x' else w
+            off = prod['oy'] if chain == 'x' else prod['ox']
+            psize = prod['h'] if chain == 'x' else prod['w']
+            cross_size = max(cross_size, max(off + psize, bh) - min(0.0, off))
+        # 沿链长度按毛坯 + 物理间距保守估算（封边补偿只可能增大需求）
+        pitch_gap = gap
         chain_len = sum((g[0] if chain == 'x' else g[1]) for g in geoms) \
             + (len(members) - 1) * pitch_gap
         U = st['uw'] if chain == 'x' else st['uh']
@@ -897,18 +1163,20 @@ def place_group(group, insts_by_uid, states, gap, margin):
         if chain_len > U + EPS or cross_size > V + EPS:
             return None
 
-        # 枚举首成员带坐标（贴 0 / 已有零件外缘 +gap / 缺陷外扩角点）
-        first_bands = _band_coords(chain, st, [], gap, None, None, members[0])
+        # 枚举首成员带坐标（毛坯原点；贴 0 / 已有零件外缘 +gap / 缺陷外扩角点）
+        first_bands = _band_coords(chain, st, [], gap, None, None,
+                                   members[0], geoms[0])
         for fb in first_bands:
             recs, extra = [], []
             ok = True
-            for k, (inst, (w, h, rot)) in enumerate(zip(members, geoms)):
+            for k, (inst, geom) in enumerate(zip(members, geoms)):
+                w, h, rot, prod = geom
                 prev = recs[-1] if recs else None
                 period = T if longitudinal else 0
                 cc = _chain_cands(chain, st, extra, 0.0, gap, pgap, prev,
-                                  period, tol, margin, inst)
+                                  period, tol, margin, inst, geom)
                 bc = [fb] if prev is None else _band_coords(
-                    chain, st, extra, gap, prev, fb, inst)
+                    chain, st, extra, gap, prev, fb, inst, geom)
                 found = None
                 for c in cc:
                     for b in bc:
@@ -917,10 +1185,20 @@ def place_group(group, insts_by_uid, states, gap, margin):
                         if not _rect_ok(st, x, y, ww, hh, inst, gap, extra):
                             continue
                         if prev is not None:
-                            seam = _seam_for_records(prev, {'x': x, 'y': y, 'w': w, 'h': h},
+                            cur_rec = {'x': x, 'y': y, 'w': w, 'h': h,
+                                       'product': prod}
+                            seam = _seam_for_records(prev, cur_rec,
                                                      chain, group, prev['state'], st, margin)
                             if not seam_qualified(seam, tol):
                                 continue
+                            # 无周期沿链对花：补偿后最小可达成品间隙仍超限 → 放弃
+                            if period <= EPS and st['def'].get('grain', 'none') == 'none' \
+                                    and seam['status'] == 'ok' and not seam['band']:
+                                min_gap = max(gap, pgap - prev['trailComp']
+                                             - _lead_comp(inst, chain, rot))
+                                # min_gap 即最优物理间隙对应的成品间隙
+                                if min_gap > pgap + tol + EPS:
+                                    continue
                         found = (x, y)
                         break
                     if found:
@@ -930,7 +1208,9 @@ def place_group(group, insts_by_uid, states, gap, margin):
                     break
                 x, y = found
                 rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
-                       'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
+                       'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot,
+                       'product': prod, '_geom': geom}
+                _record_product(rec, chain)
                 recs.append(rec)
                 extra.append(rec)
             if ok and len(recs) == len(members):
@@ -962,24 +1242,27 @@ def place_group(group, insts_by_uid, states, gap, margin):
             geom = _group_geom(inst, st)
             if geom is None:
                 continue
-            w, h, rot = geom
+            w, h, rot, prod = geom
             gax = _grain_axis(st, chain)
             T = st['def'].get('grainPeriod', 0) or 0
             longitudinal = (gax == chain)
             extra = extras.get(id(st), [])
-            if prev is not None and prev['state'] is st:
-                start = ((prev['x'] + prev['w']) if chain == 'x'
-                         else (prev['y'] + prev['h'])) + gap
+            same_prev = prev if prev is not None and prev['state'] is st else None
+            if same_prev is not None:
+                start = ((same_prev['x'] + same_prev['w']) if chain == 'x'
+                         else (same_prev['y'] + same_prev['h'])) + gap
             else:
                 start = 0.0
             period = T if (prev is not None and longitudinal) else 0
-            cc = _chain_cands(chain, st, extra, start, gap, pgap,
-                              prev if prev is not None and prev['state'] is st else None,
-                              period, tol, margin, inst)
-            bc = _band_coords(chain, st, extra, gap,
-                              prev if prev is not None and prev['state'] is st else None,
-                              prev['y' if chain == 'x' else 'x'] if prev is not None else None,
-                              inst)
+            cc = _chain_cands(chain, st, extra, start, gap, pgap, same_prev,
+                              period, tol, margin, inst, geom)
+            # 跨板时首带按上一成员成品边对齐（first_band=上件成品起边）；
+            # 新板首件从 0 起枚举
+            first_band = None
+            if prev is not None and not same_prev:
+                first_band = prev['crossLead']
+            bc = _band_coords(chain, st, extra, gap, same_prev, first_band,
+                              inst, geom)
             geom_feasible = False
             seam_bad = None
             seam_unknown = None
@@ -990,7 +1273,9 @@ def place_group(group, insts_by_uid, states, gap, margin):
                         continue
                     geom_feasible = True
                     if prev is not None:
-                        seam = _seam_for_records(prev, {'x': x, 'y': y, 'w': w, 'h': h},
+                        cur_rec = {'x': x, 'y': y, 'w': w, 'h': h,
+                                   'product': prod}
+                        seam = _seam_for_records(prev, cur_rec,
                                                  chain, group, prev['state'], st, margin)
                         if seam['status'] == 'unknown':
                             seam_unknown = seam
@@ -998,8 +1283,19 @@ def place_group(group, insts_by_uid, states, gap, margin):
                         if not seam_qualified(seam, tol):
                             seam_bad = seam
                             continue
+                        # 同板无周期沿链：补偿后最小可达成品间隙仍超限 → 放弃
+                        if same_prev is not None and period <= EPS and \
+                                st['def'].get('grain', 'none') == 'none' and \
+                                seam['status'] == 'ok' and not seam['band']:
+                            min_gap = max(gap, pgap - same_prev['trailComp']
+                                          + _lead_comp(inst, chain, rot))
+                            if min_gap > pgap + tol + EPS:
+                                seam_bad = seam
+                                continue
                     rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
-                           'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
+                           'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot,
+                           'product': prod, '_geom': geom}
+                    _record_product(rec, chain)
                     recs.append(rec)
                     extras.setdefault(id(st), []).append(rec)
                     placed_here = True
@@ -1024,6 +1320,15 @@ def place_group(group, insts_by_uid, states, gap, margin):
                     f"接缝错花量 {seam_bad['offset']:g}mm 超过可接受值 {tol:g}mm（"
                     f"{prev['state']['def']['sheetId']} #{prev['state']['def']['instance'] + 1}"
                     f" → {st['def']['sheetId']} #{st['def']['instance'] + 1}）")
+            # 同板补偿后接缝超限：物理净距无法既留锯缝又满足成品间隙容差
+            if same_prev is not None and seam_bad is not None and \
+                    st['def'].get('grain', 'none') == 'none' and period <= EPS:
+                pside = EDGE_LABELS[_facing_side(chain, 'trail', same_prev['rot'])]
+                cside = EDGE_LABELS[_facing_side(chain, 'lead', rot)]
+                causes.add(
+                    f"补偿后接缝超限：{same_prev['uid']} {pside} 与 {inst['uid']} {cside}"
+                    f"封边后，最小可达成品间隙 {max(gap, pgap - same_prev['trailComp'] + _lead_comp(inst, chain, rot)):g}mm"
+                    f" 仍超过成品间隙 {pgap:g}mm + 容差 {tol:g}mm")
             if not geom_feasible:
                 causes.add(
                     f"板材 {st['def']['sheetId']} #{st['def']['instance'] + 1} "
@@ -1056,19 +1361,25 @@ def _group_fail_reason(group, members, compatible, gap, margin):
     chain = 'x' if group['dir'] == 'h' else 'y'
     st = compatible[0]
     geoms = [_group_geom(i, st) for i in members]
-    cross_size = max((g[1] if chain == 'x' else g[0]) for g in geoms)
+    cross_size = 0.0
+    for g in geoms:
+        w, h, rot, prod = g
+        bh = h if chain == 'x' else w
+        off = prod['oy'] if chain == 'x' else prod['ox']
+        psize = prod['h'] if chain == 'x' else prod['w']
+        cross_size = max(cross_size, max(off + psize, bh) - min(0.0, off))
     chain_len = sum((g[0] if chain == 'x' else g[1]) for g in geoms) \
-        + (len(members) - 1) * max(gap, group['productGap'])
+        + (len(members) - 1) * gap
     U = st['uw'] if chain == 'x' else st['uh']
     V = st['uh'] if chain == 'x' else st['uw']
     gax = _grain_axis(st, chain)
     T = st['def'].get('grainPeriod', 0) or 0
     if chain_len > U + EPS or cross_size > V + EPS:
-        return ('整组外形 %g×%g 超出板材可用区域 %g×%g'
+        return ('整组毛坯外形 %g×%g 超出板材可用区域 %g×%g'
                 % (chain_len, cross_size, U, V))
     if gax == chain and T <= EPS and (st['def'].get('grain') or 'none') != 'none':
         return '原料板未记录纹理重复周期，无法保证沿纹理方向的错花量 ≤ %gmm' % group['tolerance']
-    return ('整组无法在同一张板上同时满足同带次序、锯缝/间距与错花量 ≤ %gmm（含缺陷避让）'
+    return ('整组无法在同一张板上同时满足同带次序、锯缝/间距与错花量 ≤ %gmm（含封边补偿与缺陷避让）'
             % group['tolerance'])
 
 
@@ -1079,6 +1390,7 @@ def _commit_group_records(records, group_id):
             'uid': r['uid'], 'partId': r['inst']['partId'], 'name': r['inst']['name'],
             'x': r['x'], 'y': r['y'], 'w': r['w'], 'h': r['h'],
             'rotated': r['rot'], 'locked': False,
+            'product': r.get('product'),
             'groupId': group_id, 'memberIndex': mi,
         })
 
@@ -1115,10 +1427,14 @@ def _analyze_groups(layout_states, groups, group_ids_by_uid, margin):
                                     'instance': st['def']['instance'],
                                     'memberIndex': mi})
                 if prev_r is not None:
-                    p_abs = {'x': prev_r['x'] + margin, 'y': prev_r['y'] + margin,
-                             'w': prev_r['w'], 'h': prev_r['h']}
-                    c_abs = {'x': r['x'] + margin, 'y': r['y'] + margin,
-                             'w': r['w'], 'h': r['h']}
+                    def _abs_with_product(rr):
+                        a = {'x': rr['x'] + margin, 'y': rr['y'] + margin,
+                             'w': rr['w'], 'h': rr['h']}
+                        if rr.get('product'):
+                            a['product'] = rr['product']
+                        return a
+                    p_abs = _abs_with_product(prev_r)
+                    c_abs = _abs_with_product(r)
                     axis = 'x' if g['dir'] == 'h' else 'y'
                     seam = evaluate_seam(p_abs, c_abs, axis, g['productGap'],
                                          prev_st['def'], st['def'])
@@ -1165,11 +1481,13 @@ def _analyze_groups(layout_states, groups, group_ids_by_uid, margin):
     return groups_out, where, status_by_id
 
 
-def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=None):
+def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=None,
+         part_defs=None):
     """执行一次排样。locked: {板材实例序号字符串: [已锁定放置]}，这些放置保持不动。
 
     groups: 拼纹对花组（normalize_groups 后的列表）。组按原子单位优先于散件排样；
     组员次序、同带与纹理相位容差同板边/锯缝/方向/缺陷限制一并生效。
+    part_defs: 零件定义原始列表，用于汇总封边工序核对（毛坯非正/外露未封/拼接误封）。
     """
     kerf = _f(settings.get('kerf'), 3)
     margin = _f(settings.get('margin'), 0)
@@ -1178,17 +1496,24 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
     locked = locked or {}
     groups = groups or []
 
+    insts_by_uid = {p['uid']: p for p in part_insts}
     locked_uids = set()
     states = []
     for idx, s in enumerate(sheet_insts):
         placed = []
         for lp in locked.get(str(idx), []):
+            rot = bool(lp.get('rotated'))
+            prod = None
+            inst = insts_by_uid.get(lp['uid'])
+            if inst is not None:
+                prod = instance_product(inst, rot)
             placed.append({
                 'uid': lp['uid'], 'partId': lp['partId'],
                 'name': lp.get('name') or lp['partId'],
                 'x': _f(lp.get('x')) - margin, 'y': _f(lp.get('y')) - margin,
                 'w': _f(lp.get('w')), 'h': _f(lp.get('h')),
-                'rotated': bool(lp.get('rotated')), 'locked': True,
+                'rotated': rot, 'locked': True,
+                'product': prod,
             })
             locked_uids.add(lp['uid'])
         # 缺陷绝对坐标 → 可用区域坐标
@@ -1200,7 +1525,6 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
                        'uh': s['h'] - 2 * margin, 'placed': placed,
                        'defects': udefects})
 
-    insts_by_uid = {p['uid']: p for p in part_insts}
     group_ids_by_uid = group_member_map(groups)
     grouped_uids = set()
     for g in groups:
@@ -1228,6 +1552,10 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
 
     unplaced = []
     for inst in pool:
+        # 毛坯尺寸非正：定义级错误，无法参与任何排样
+        if inst['w'] <= EPS or inst['h'] <= EPS:
+            unplaced.append(inst)
+            continue
         done = False
         for st in states:  # 按板材顺序 first-fit，优先填满前面的板
             if st['uw'] <= EPS or st['uh'] <= EPS:
@@ -1239,6 +1567,7 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
                     'uid': inst['uid'], 'partId': inst['partId'], 'name': inst['name'],
                     'x': pos['x'], 'y': pos['y'], 'w': pos['w'], 'h': pos['h'],
                     'rotated': pos['rotated'], 'locked': False,
+                    'product': instance_product(inst, pos['rotated']),
                 })
                 done = True
                 break
@@ -1291,6 +1620,9 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
             'locked': r.get('locked', False),
             'groupId': r.get('groupId'),
             'memberIndex': r.get('memberIndex'),
+            # 成品外廓（毛坯坐标内）：旧客户端/旧项目无补偿时与毛坯相同
+            'product': (r.get('product') or
+                        {'w': r['w'], 'h': r['h'], 'ox': 0.0, 'oy': 0.0}),
         } for r in st['placed']]
         # 每张已用板材自身的避让碎料（未使用板不计入方案比较）
         sheet_scrap = sum(expanded_defect_area(d, margin, st['uw'], st['uh'])
@@ -1340,14 +1672,30 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
                 'groupBlocked': True,
             })
             continue
+        if p['w'] <= EPS or p['h'] <= EPS:
+            unplaced_out.append({
+                'uid': p['uid'], 'partId': p['partId'], 'name': p['name'],
+                'reason': f"封边补偿后毛坯尺寸 {p['w']:g}×{p['h']:g}mm 非正，"
+                          f"无法下料（成品 {p['productW']:g}×{p['productH']:g}mm，"
+                          f"请减小封边厚度或检查修边余量）", 'conflicts': [],
+            })
+            continue
         reason = _unplaced_reason(p, states, settings)
         unplaced_out.append({
             'uid': p['uid'], 'partId': p['partId'], 'name': p['name'],
             'reason': reason['text'], 'conflicts': reason['conflicts'],
         })
+    # 封边工序核对（定义级，与摆放无关）：毛坯非正/外露未封/拼接误封
+    edge_issues = []
+    for pdef in (part_defs or []):
+        for iss in part_edge_issues(pdef):
+            edge_issues.append({'partId': pdef.get('id'),
+                                'name': pdef.get('name') or pdef.get('id'),
+                                **iss})
+
     return {'sheets': out_sheets, 'unplaced': unplaced_out,
             'conflicts': conflict_rows, 'stats': stats,
-            'grainGroups': groups_out}
+            'grainGroups': groups_out, 'edgeIssues': edge_issues}
 
 
 def _signature(res):
@@ -1392,7 +1740,8 @@ def generate_layouts(payload, max_layouts=3):
 
     results, seen = [], set()
     for label, key in STRATEGIES:
-        res = pack(part_insts, sheet_insts, settings, locked, key, groups)
+        res = pack(part_insts, sheet_insts, settings, locked, key, groups,
+                   part_defs=payload.get('parts'))
         sig = _signature(res)
         if sig in seen:
             continue
@@ -1413,4 +1762,6 @@ def generate_layouts(payload, max_layouts=3):
     max_layouts = max(1, min(int(_f(max_layouts, 3)), 5))
     layouts = [{'id': i + 1, 'strategy': label, **res}
                for i, (label, res) in enumerate(results[:max_layouts])]
-    return {'layouts': layouts}
+    # 封边工序核对为定义级问题，各方案相同：提到响应顶层便于前端直接提示
+    edge_issues = results[0][1].get('edgeIssues', []) if results else []
+    return {'layouts': layouts, 'edgeIssues': edge_issues}

@@ -55,13 +55,32 @@ const Grain = {
     return chain;
   },
 
-  /* 与 nesting.evaluate_seam 同口径。prev/cur 为绝对坐标放置记录；
-     sPrev/sCur 为 sheetInfo；gapSheet 可显式给定板上净距。 */
-  evaluateSeam(prev, cur, axis, productGap, sPrev, sCur, gapSheet) {
+  /* 与 nesting.evaluate_seam 同口径。prev/cur 为毛坯绝对坐标放置记录，
+     携带 product {w,h,ox,oy} 时拼缝按【成品边】计算；
+     sPrev/sCur 为 sheetInfo；gapSheet 可显式给定板上净距（毛坯）。 */
+  evaluateSeam(prev0, cur0, axis, productGap, sPrev, sCur, gapSheet) {
+    // 毛坯 → 成品外廓（封边补偿后成品可能悬出毛坯）
+    const toProd = r => {
+      const pr = r.product;
+      if (pr && pr.w != null) {
+        return { x: r.x + (+pr.ox || 0), y: r.y + (+pr.oy || 0), w: +pr.w, h: +pr.h };
+      }
+      if (typeof Edging !== 'undefined') {
+        const pd = App.partDef(r.partId);
+        if (pd) {
+          const g = Edging.productGeom(pd, !!r.rotated);
+          return { x: r.x + g.ox, y: r.y + g.oy, w: g.w, h: g.h };
+        }
+      }
+      return { x: r.x, y: r.y, w: r.w, h: r.h };
+    };
+    let prev = prev0, cur = cur0;
     if (gapSheet == null) {
+      const pp = toProd(prev0), cc = toProd(cur0);
       gapSheet = axis === 'x'
-        ? cur.x - (prev.x + prev.w)
-        : cur.y - (prev.y + prev.h);
+        ? cc.x - (pp.x + pp.w)
+        : cc.y - (pp.y + pp.h);
+      prev = pp; cur = cc;
     }
     const Tp = +sPrev.period || 0, Tc = +sCur.period || 0;
     const sameBoard = sPrev.id === sCur.id && sPrev.instance === sCur.instance;
@@ -107,6 +126,23 @@ const Grain = {
     if (!(Tp > this.EPS) || !(Tc > this.EPS)) return unk('原料板未记录纹理重复周期，跨板带向相位无法核算');
     if (Math.abs(Tp - Tc) > this.EPS) return unk('两张原料板纹理周期不一致，带向相位无法对齐');
     return { offset: this.phaseWrap(pb - pa, Tp), status: 'ok', band: false, reason: '' };
+  },
+
+  /* 毛坯放置记录 → 成品外廓（供接缝边缘定位） */
+  _prodRect(placement, uid) {
+    if (placement.product && placement.product.w != null) {
+      const pr = placement.product;
+      return { x: placement.x + (+pr.ox || 0), y: placement.y + (+pr.oy || 0),
+               w: +pr.w, h: +pr.h };
+    }
+    if (typeof Edging !== 'undefined') {
+      const pd = App.uidPart(uid);
+      if (pd) {
+        const g = Edging.productGeom(pd, !!placement.rotated);
+        return { x: placement.x + g.ox, y: placement.y + g.oy, w: g.w, h: g.h };
+      }
+    }
+    return { x: placement.x, y: placement.y, w: placement.w, h: placement.h };
   },
 
   seamQualified(seam, tol) {
@@ -166,13 +202,21 @@ const Grain = {
               band: seam.band, reason: seam.reason,
               tolerance: g.tolerance, productGap: g.productGap,
               qualified,
-              // 画布定位用：缝在板上的中点（同板）或各自边缘
+              // 画布定位用：缝在板上的中点（同板）或各自边缘（成品边）
               fromEdge: axis === 'x'
-                ? { x: prev.placement.x + prev.placement.w, y: prev.placement.y, h: prev.placement.h, sheetIndex: prev.sheetIndex }
-                : { x: prev.placement.x, y: prev.placement.y + prev.placement.h, w: prev.placement.w, sheetIndex: prev.sheetIndex },
+                ? { x: this._prodRect(prev.placement, prev.uid).x + this._prodRect(prev.placement, prev.uid).w,
+                    y: this._prodRect(prev.placement, prev.uid).y,
+                    h: this._prodRect(prev.placement, prev.uid).h, sheetIndex: prev.sheetIndex }
+                : { x: this._prodRect(prev.placement, prev.uid).x,
+                    y: this._prodRect(prev.placement, prev.uid).y + this._prodRect(prev.placement, prev.uid).h,
+                    w: this._prodRect(prev.placement, prev.uid).w, sheetIndex: prev.sheetIndex },
               toEdge: axis === 'x'
-                ? { x: hit.placement.x, y: hit.placement.y, h: hit.placement.h, sheetIndex: hit.sheetIndex }
-                : { x: hit.placement.x, y: hit.placement.y, w: hit.placement.w, sheetIndex: hit.sheetIndex },
+                ? { x: this._prodRect(hit.placement, uid).x,
+                    y: this._prodRect(hit.placement, uid).y,
+                    h: this._prodRect(hit.placement, uid).h, sheetIndex: hit.sheetIndex }
+                : { x: this._prodRect(hit.placement, uid).x,
+                    y: this._prodRect(hit.placement, uid).y,
+                    w: this._prodRect(hit.placement, uid).w, sheetIndex: hit.sheetIndex },
             };
             seams.push(row);
           }

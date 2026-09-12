@@ -87,12 +87,13 @@ const Validate = {
             flag(p.uid, 'grain');
             say(p.uid, 'grain', `${p.uid}（${pd.name}）纹理（${this.grainLabel(pd.grain)}）与板材纹理（${this.grainLabel(sg)}）冲突`);
           }
-          // 尺寸与定义一致性
-          const ow = p.rotated ? +pd.height : +pd.width;
-          const oh = p.rotated ? +pd.width : +pd.height;
-          if (Math.abs(ow - p.w) > 0.01 || Math.abs(oh - p.h) > 0.01) {
+          // 尺寸与定义一致性：排样使用毛坯外廓（旋转后按毛坯宽高换向）
+          const bd = App.blankDef(pd, p.rotated);
+          if (Math.abs(bd.w - p.w) > 0.01 || Math.abs(bd.h - p.h) > 0.01) {
             flag(p.uid, 'size');
-            say(p.uid, 'size', `${p.uid} 尺寸与零件定义（${pd.width}×${pd.height}）不符`);
+            const d0 = App.blankDef(pd, false);
+            say(p.uid, 'size', `${p.uid} 毛坯尺寸与零件定义（成品 ${pd.width}×${pd.height}，` +
+              `毛坯 ${fmtNum(d0.w)}×${fmtNum(d0.h)}）不符，请重新生成排样`);
           }
           // 板面缺陷冲突（安全外扩/面别/等级/容许区）
           const hit = Defects.blockingDefect(p, pd, defects);
@@ -126,6 +127,21 @@ const Validate = {
         }
       }
     });
+    // 封边工序核对（定义级，与摆放无关）：毛坯非正 / 外露未封 / 拼接误封
+    if (typeof Edging !== 'undefined') {
+      App.parts.forEach((pd) => {
+        const issues = Edging.partIssues(pd);
+        if (!issues.length) return;
+        // 该定义的已放置实例标 v-edge（毛坯问题排第一优先）
+        lay.sheets.forEach(si => si.placements.forEach((pl) => {
+          if (pl.partId === pd.id) flag(pl.uid, 'edge');
+        }));
+        issues.forEach((iss) => {
+          say('part:' + pd.id, 'edge', iss.msg,
+            { type: 'edge', partId: pd.id, edge: iss.edge, code: iss.code });
+        });
+      });
+    }
     // 拼纹对花：逐缝错花量、同板要求、组完整性（与后端同口径）
     const grain = (typeof Grain !== 'undefined') ? Grain.evaluate(lay)
       : { groups: [], seams: [], badUids: new Set(), completeCount: 0, totalGroups: 0 };
@@ -144,6 +160,38 @@ const Validate = {
           `拼纹组 ${g.id} 要求全部取自同一张板，但当前分布在多张板上`, null);
       }
     });
+    // 补偿后接缝超限：逐对相邻成员按封边补偿估算最小可达成品间隙
+    if (typeof Edging !== 'undefined') {
+      grain.groups.forEach((g) => {
+        for (let k = 0; k + 1 < g.members.length; k++) {
+          const a = g.members[k], b = g.members[k + 1];
+          if (!a.onBoard || !b.onBoard || a.sheetIndex !== b.sheetIndex) continue;
+          const pa = App.uidPart(a.uid), pb = App.uidPart(b.uid);
+          if (!pa || !pb) continue;
+          const axis = g.dir === 'h' ? 'x' : 'y';
+          const ra = Grain.findOnBoard(lay, a.uid).placement;
+          const visTrail = axis === 'x' ? 'right' : 'bottom';
+          const visLead = axis === 'x' ? 'left' : 'top';
+          // 外形边 → canonical 边
+          const canon = (pd, vis, rot) => Edging.canonicalKey(vis, rot);
+          const ea = Edging.edge(pa, canon(pa, visTrail, !!ra.rotated));
+          const rb = Grain.findOnBoard(lay, b.uid).placement;
+          const eb = Edging.edge(pb, canon(pb, visLead, !!rb.rotated));
+          const ta = Edging.edgeComp(ea), tb = Edging.edgeComp(eb);
+          const minProd = gap - ta - tb;
+          if (minProd > g.productGap + g.tolerance + this.EPS) {
+            flag(a.uid, 'grainmatch'); flag(b.uid, 'grainmatch');
+            const sA = `${Edging.LABELS[canon(pa, visTrail, !!ra.rotated)]}${ea.kind === 'exposed' ? '封' + fmtNum(ea.thickness) + 'mm' : ''}`;
+            const sB = `${Edging.LABELS[canon(pb, visLead, !!rb.rotated)]}${eb.kind === 'exposed' ? '封' + fmtNum(eb.thickness) + 'mm' : ''}`;
+            say(null, 'grainmatch',
+              `拼纹组 ${g.id} 接缝 ${a.uid}–${b.uid} 补偿后超限：${a.uid} ${sA} 与 ${b.uid} ${sB} ` +
+              `封边后最小成品间隙 ${fmtNum(minProd)}mm，超过成品间隙 ${fmtNum(g.productGap)}mm + 容差 ${fmtNum(g.tolerance)}mm`,
+              { type: 'seam', groupId: g.id, from: a.uid, to: b.uid,
+                sheetIndex: b.sheetIndex });
+          }
+        }
+      });
+    }
     grain.seams.forEach((s) => {
       if (s.qualified) return;
       flag(s.from, 'grainmatch');

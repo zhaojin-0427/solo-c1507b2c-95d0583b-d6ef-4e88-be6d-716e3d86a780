@@ -240,7 +240,7 @@ const Canvas = {
     if (grp) cls += ' in-group';
     const v = App.violations.vmap.get(p.uid);
     if (v) {
-      for (const code of ['overlap', 'bounds', 'spacing', 'grain', 'nodef', 'size', 'defect', 'grainmatch']) {
+      for (const code of ['overlap', 'bounds', 'spacing', 'grain', 'nodef', 'size', 'defect', 'grainmatch', 'edge']) {
         if (v.has(code)) { cls += ' v-' + code; break; }
       }
     }
@@ -252,12 +252,52 @@ const Canvas = {
       class: this.partClass(p), 'data-uid': p.uid,
       transform: `translate(${p.x}, ${p.y})`,
     }, sheetG);
+    // 毛坯外廓（排样/裁切使用）
     const rect = this.el('rect', {
-      class: 'part-rect', width: p.w, height: p.h, rx: 1.5,
+      class: 'part-rect part-blank', width: p.w, height: p.h, rx: 1.5,
       fill: colorFor(p.partId),
     }, g);
 
     const pd = App.uidPart(p.uid);
+    // 成品轮廓（封边补偿后相对毛坯偏移，可能悬出）+ 待封边方向标记
+    let ves = null;
+    if (pd) {
+      const pr = Edging.productRect(p, pd);
+      const hasComp = Math.abs(pr.ox) > 1e-6 || Math.abs(pr.oy) > 1e-6 ||
+        Math.abs(pr.w - p.w) > 1e-6 || Math.abs(pr.h - p.h) > 1e-6;
+      if (hasComp) {
+        this.el('rect', {
+          class: 'part-product', x: pr.ox, y: pr.oy, width: pr.w, height: pr.h,
+        }, g);
+      }
+      ves = Edging.visualEdges(pd, !!p.rotated);
+      const batches = (App.edgingBatches && App.layout())
+        ? App.edgingBatches() : null;
+      const colorOf = (mat, th) => {
+        if (!batches) return '#5d4037';
+        const b = batches.find(x => x.material === (mat || '未命名材料') &&
+          Math.abs(x.thickness - th) < 1e-9);
+        return b ? Edging.batchColor(b.key) : '#5d4037';
+      };
+      ves.forEach((e) => {
+        if (!e.banded) return;
+        const col = colorOf(e.material, e.thickness);
+        const sw = Math.max(2.2, Math.min(9, e.thickness * 1.4));
+        if (e.key === 'top') {
+          this.el('line', { class: 'edge-band', x1: pr.x - p.x, y1: pr.y - p.y,
+            x2: pr.x - p.x + pr.w, y2: pr.y - p.y, stroke: col, 'stroke-width': sw }, g);
+        } else if (e.key === 'bottom') {
+          this.el('line', { class: 'edge-band', x1: pr.x - p.x, y1: pr.y - p.y + pr.h,
+            x2: pr.x - p.x + pr.w, y2: pr.y - p.y + pr.h, stroke: col, 'stroke-width': sw }, g);
+        } else if (e.key === 'left') {
+          this.el('line', { class: 'edge-band', x1: pr.x - p.x, y1: pr.y - p.y,
+            x2: pr.x - p.x, y2: pr.y - p.y + pr.h, stroke: col, 'stroke-width': sw }, g);
+        } else {
+          this.el('line', { class: 'edge-band', x1: pr.x - p.x + pr.w, y1: pr.y - p.y,
+            x2: pr.x - p.x + pr.w, y2: pr.y - p.y + pr.h, stroke: col, 'stroke-width': sw }, g);
+        }
+      });
+    }
     // 零件纹理方向指示线（沿零件宽度方向）
     if (pd && pd.grain && pd.grain !== 'none' && p.w > 40 && p.h > 20) {
       const n = Math.max(2, Math.floor(p.h / 40));
@@ -273,8 +313,15 @@ const Canvas = {
       const t1 = this.el('text', { class: 'part-label', x: p.w / 2, y: p.h / 2 - (minSide >= 46 ? fs * 0.18 : -fs * 0.3), 'font-size': fs }, g);
       t1.textContent = (pd ? pd.name : p.partId) + ' ' + String(p.uid).split('#')[1];
       if (minSide >= 46) {
+        const pr0 = Edging.productRect(p, pd);
+        const hasComp = Math.abs(pr0.w - p.w) > 1e-6 || Math.abs(pr0.h - p.h) > 1e-6 ||
+          Math.abs(pr0.ox) > 1e-6 || Math.abs(pr0.oy) > 1e-6;
         const t2 = this.el('text', { class: 'part-dim', x: p.w / 2, y: p.h / 2 + fs * 0.85, 'font-size': fs * 0.72 }, g);
-        t2.textContent = `${fmtNum(p.w)}×${fmtNum(p.h)}`;
+        t2.textContent = `坯 ${fmtNum(p.w)}×${fmtNum(p.h)}`;
+        if (hasComp && minSide >= 70) {
+          const t3 = this.el('text', { class: 'part-dim part-dim-prod', x: p.w / 2, y: p.h / 2 + fs * 1.55, 'font-size': fs * 0.62 }, g);
+          t3.textContent = `成品 ${fmtNum(pr0.w)}×${fmtNum(pr0.h)}`;
+        }
       }
     }
     if (p.rotated && minSide >= 30) {
@@ -555,15 +602,18 @@ const Canvas = {
     const pd = App.uidPart(uid);
     if (!pd) { toast('该零件定义已不存在'); App.placeMode = null; return; }
     const off = this.sheetOffsets[tIdx];
-    const w = +pd.width, h = +pd.height;
+    const bd = App.blankDef(pd, false);
+    const w = bd.w, h = bd.h;
     const x = Math.max(0, Math.round(wpt.x - off.x - w / 2));
     const y = Math.max(0, Math.round(wpt.y - off.y - h / 2));
 
     const [u] = lay.unplaced.splice(ui, 1);
-    lay.sheets[tIdx].placements.push({
+    const placement = {
       uid: u.uid, partId: u.partId, name: u.name || u.partId,
       x, y, w, h, rotated: false, locked: false,
-    });
+    };
+    if (typeof Edging !== 'undefined') placement.product = Edging.productGeom(pd, false);
+    lay.sheets[tIdx].placements.push(placement);
     App.placeMode = null;
     App.selected = uid;
     App.pushHistory();

@@ -5,6 +5,7 @@ const Main = {
     Canvas.init();
     CutUI.init();
     GrainUI.init();
+    if (typeof EdgeUI !== 'undefined') EdgeUI.init();
     this.bindTopbar();
     this.bindSettings();
     this.bindDefForms();
@@ -20,19 +21,42 @@ const Main = {
   },
 
   /* ---- 示例数据 ---- */
+  /* 默认四边：不处理。示例中侧板左/右外露封 PVC 1mm（修边余量 0.5），
+     门板四边外露封 ABS 2mm，抽屉面四外露 1mm；拼纹拼接边均不封。 */
+  defaultEdges() {
+    const none = () => ({ kind: 'none', material: '', thickness: 0, trim: 0 });
+    return { top: none(), right: none(), bottom: none(), left: none() };
+  },
+  edgesBox(mask, material, thickness, trim) {
+    // mask: 'lrtb' 中出现的边标外露并填材料/厚度/余量，其余为不处理
+    const e = this.defaultEdges();
+    for (const k of mask) {
+      e[{ l: 'left', r: 'right', t: 'top', b: 'bottom' }[k]] =
+        { kind: 'exposed', material, thickness, trim: trim || 0 };
+    }
+    return e;
+  },
+
   loadSample() {
     App.settings = { kerf: 3, margin: 5, spacing: 2 };
+    App.edgingOrder = { mode: 'shortFirst', orders: {} };
     App.sheets = [
       { id: 'S1', name: '多层板', width: 2440, height: 1220, grain: 'vertical', quantity: 2,
         grainPeriod: 240, grainBase: { x: 0, y: 0 } },
     ];
+    const noEdge = this.defaultEdges();
     App.parts = [
-      { id: 'P1', name: '侧板', width: 600, height: 400, quantity: 4, rotatable: true, grain: 'none', faceReq: 'front', allowGrade: 1, allowZones: [] },
-      { id: 'P2', name: '层板', width: 560, height: 300, quantity: 6, rotatable: true, grain: 'none', faceReq: 'any', allowGrade: 2, allowZones: [] },
-      { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
+      { id: 'P1', name: '侧板', width: 600, height: 400, quantity: 4, rotatable: true, grain: 'none', faceReq: 'front', allowGrade: 1, allowZones: [],
+        edges: this.edgesBox('lr', 'PVC 封边条', 1, 0.5) },
+      { id: 'P2', name: '层板', width: 560, height: 300, quantity: 6, rotatable: true, grain: 'none', faceReq: 'any', allowGrade: 2, allowZones: [],
+        edges: { ...noEdge, left: { kind: 'join' }, right: { kind: 'join' } } },
+      { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [],
+        edges: this.edgesBox('lrtb', 'ABS 封边条', 2, 0) },
       { id: 'P4', name: '背板', width: 580, height: 380, quantity: 2, rotatable: true, grain: 'none', faceReq: 'back', allowGrade: 0,
-        allowZones: [{ points: [{ x: 0, y: 300 }, { x: 200, y: 300 }, { x: 200, y: 380 }, { x: 0, y: 380 }] }] },
-      { id: 'P5', name: '抽屉面', width: 460, height: 200, quantity: 3, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
+        allowZones: [{ points: [{ x: 0, y: 300 }, { x: 200, y: 300 }, { x: 200, y: 380 }, { x: 0, y: 380 }] }],
+        edges: { ...noEdge } },
+      { id: 'P5', name: '抽屉面', width: 460, height: 200, quantity: 3, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [],
+        edges: this.edgesBox('lrtb', 'PVC 封边条', 1, 0) },
     ];
     // 拼纹对花组：柜门 4 连拼、抽屉面 3 连拼（安装次序即成员次序）
     App.grainGroups = [
@@ -70,6 +94,7 @@ const Main = {
       App.parts = [];
       App.defects = {};
       App.grainGroups = [];
+      App.edgingOrder = { mode: 'shortFirst', orders: {} };
       App.layouts = [];
       App.active = 0;
       App.selected = null;
@@ -135,6 +160,7 @@ const Main = {
         rotatable: g('pt-rot') === '1',
         grain: g('pt-grain'),
         faceReq: 'any', allowGrade: 0, allowZones: [],
+        edges: this.defaultEdges(),
       });
       UI.renderPartsTable();
       this.onStructureChanged(false);
@@ -306,8 +332,10 @@ const Main = {
     if (!pd) return;
     if (pd.grain !== 'none') { toast(`「${pd.name}」有纹理方向要求，不能旋转`); return; }
     if (!pd.rotatable) { toast(`「${pd.name}」设为不可旋转`); return; }
+    // 毛坯外廓换向；成品几何随放置方向重算（边属性在渲染/工序中按方向映射）
     [p.w, p.h] = [p.h, p.w];
     p.rotated = !p.rotated;
+    if (typeof Edging !== 'undefined') p.product = Edging.productGeom(pd, p.rotated);
     App.pushHistory();
     renderAll();
   },

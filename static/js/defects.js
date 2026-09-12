@@ -170,13 +170,16 @@ const Defects = {
     return false;
   },
 
-  /* 零件局部容许区 → 放置后坐标。旋转映射与后端一致：(lx,ly)→(x+ph-ly, y+lx) */
+  /* 零件局部容许区 → 放置后坐标。旋转映射与后端一致：(lx,ly)→(x+ph-ly, y+lx)；
+     未旋转时成品相对毛坯原点偏移 (ox,oy)（封边补偿，可为负=封边条悬出）。 */
   transformZone(zone, p, pd) {
     const rotated = !!p.rotated;
     const pw = +pd.width, ph = +pd.height;
+    const g = (typeof Edging !== 'undefined') ? Edging.productGeom(pd, rotated)
+      : { w: pw, h: ph, ox: 0, oy: 0 };
     return (zone.points || []).map(q => rotated
       ? { x: p.x + ph - q.y, y: p.y + q.x }
-      : { x: p.x + q.x, y: p.y + q.y });
+      : { x: p.x + g.ox + q.x, y: p.y + g.oy + q.y });
   },
 
   /* 缺陷核心是否整体落在零件某容许区内 */
