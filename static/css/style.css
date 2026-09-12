@@ -381,3 +381,122 @@ input:focus, select:focus { outline: 2px solid #90caf9; }
   stroke-width: 4; stroke-dasharray: 14 8;
 }
 .cut-label { fill: #37474f; font-weight: 600; }
+
+/* ===== 拼纹对花 ===== */
+.badge.teal { background: #00897b; }
+.phase-layer { pointer-events: none; }
+.phase-line { stroke: #00897b; stroke-width: 0.8; stroke-opacity: .35; stroke-dasharray: 14 8; }
+.phase-line.faint { stroke: #80cbc4; stroke-opacity: .25; }
+.phase-base { fill: #00695c; stroke: #fff; stroke-width: 1.5; }
+.phase-base-cross { stroke: #00695c; stroke-width: 2; }
+.phase-base-tag { fill: #00695c; font-size: 15px; font-weight: 600; }
+
+.part.in-group .part-rect { stroke-width: 2.5; }
+.group-badge-bg { fill: #00695c; opacity: .92; pointer-events: none; }
+.group-badge { fill: #fff; text-anchor: middle; font-weight: 700; pointer-events: none; }
+
+/* 接缝层 */
+.seam-line { stroke-width: 5; fill: none; pointer-events: none; }
+.seam-line.seam-ok { stroke: #00897b; stroke-opacity: .75; }
+.seam-line.seam-bad { stroke: var(--danger); stroke-width: 7;
+  stroke-dasharray: 18 8; animation: seamdash 1s linear infinite; }
+.seam-line.seam-unknown { stroke: var(--warn); stroke-width: 6; stroke-dasharray: 4 6; }
+@keyframes seamdash { to { stroke-dashoffset: -26; } }
+.seam-tag-bg { pointer-events: none; }
+.seam-tag { text-anchor: middle; font-weight: 700; pointer-events: none; }
+.seam-tag-bg.seam-ok { fill: #e0f2f1; stroke: #00897b; }
+.seam-tag.seam-ok { fill: #00695c; }
+.seam-tag-bg.seam-bad { fill: #ffebee; stroke: var(--danger); }
+.seam-tag.seam-bad { fill: #b71c1c; }
+.seam-tag-bg.seam-unknown { fill: #fff3e0; stroke: var(--warn); }
+.seam-tag.seam-unknown { fill: #e65100; }
+.drag-seam-layer { pointer-events: none; }
+.part.v-grainmatch .part-rect {
+  stroke: var(--danger); stroke-width: 4; stroke-dasharray: 10 5;
+  animation: seamdash 1.2s linear infinite; fill-opacity: .6;
+}
+
+/* 侧栏拼纹组列表 */
+.grain-li { cursor: default; background: #e0f2f1; border-left: 3px solid #00897b; }
+.grain-li.grain-fail { background: #ffebee; border-left-color: var(--danger); }
+.grain-li .gh { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.grain-li .gtag {
+  font-size: 10px; background: #b2dfdb; color: #004d40; border-radius: 8px; padding: 0 6px;
+}
+.grain-li .gtag.off { background: #eceff1; color: var(--muted); }
+.grain-li .gr { margin-left: auto; font-size: 11px; color: #00695c; }
+.grain-li.grain-fail .gr { color: var(--danger); }
+.grain-li.warn .gr { color: var(--warn); }
+.grain-li .gm { color: var(--muted); font-size: 11px; margin: 2px 0; }
+.grain-li .gops { display: flex; gap: 4px; }
+.grain-li .gops .mini-btn { flex: 1; }
+.mini-btn.danger { color: var(--danger); }
+.msg-list li.grain-msg { background: #e0f2f1; border-left-color: var(--danger); cursor: pointer; }
+
+/* 方案标签拼纹统计 */
+.layout-tab.adopted { box-shadow: 0 0 0 2px #00897b inset; }
+.g-ok { color: #00695c; }
+.g-bad { color: var(--danger); }
+
+/* 拼纹工具条 */
+#grain-toolbar { display: flex; align-items: center; gap: 8px; padding: 3px 8px; background: #f1f8f7; border-bottom: 1px solid #b2dfdb; }
+#grain-toolbar button { font-size: 12px; padding: 3px 10px; }
+
+/* 装配预览模态框 */
+.grain-preview { width: 860px; max-height: 82vh; }
+.mini-sel { font-size: 12px; margin-left: 8px; }
+.pv-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.pv-toolbar label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+.pv-toolbar input[type=number] { width: 64px; }
+.pv-toolbar .chk { flex-direction: row; color: var(--text); }
+.pv-body { display: flex; gap: 12px; flex: 1 1 auto; min-height: 260px; }
+.pv-chain-wrap { flex: 1 1 auto; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: #fafafa; }
+.pv-hint { color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+.pv-chain { display: flex; align-items: stretch; gap: 0; }
+.pv-chain.dir-v { flex-direction: column; }
+.pv-member {
+  display: flex; align-items: center; gap: 8px; min-width: 130px;
+  border: 2px solid #00897b; background: #fff; border-radius: 6px; padding: 8px;
+  cursor: grab; user-select: none;
+}
+.pv-chain.dir-v .pv-member { min-width: 220px; }
+.pv-member.dragging { opacity: .4; }
+.pv-member.offboard { border-color: var(--danger); background: #fff5f5; }
+.pv-member.selected { box-shadow: 0 0 0 2px var(--primary) inset; }
+.pv-no {
+  flex: 0 0 22px; height: 22px; border-radius: 50%; background: #00695c; color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+}
+.pv-info { font-size: 12px; line-height: 1.4; }
+.pv-info .pv-sub { color: var(--muted); font-size: 11px; }
+.pv-x { margin-left: auto; border: none; color: var(--danger); background: none; cursor: pointer; font-size: 14px; }
+.pv-seam {
+  align-self: center; flex: 0 0 auto; min-width: 58px; text-align: center;
+  font-size: 11px; font-weight: 700; border-radius: 12px; padding: 3px 8px; margin: 0 2px;
+  border: 1px solid;
+}
+.pv-chain.dir-v .pv-seam { margin: 2px 0; align-self: flex-start; }
+.pv-seam.seam-ok { background: #e0f2f1; color: #00695c; border-color: #00897b; }
+.pv-seam.seam-bad { background: #ffebee; color: #b71c1c; border-color: var(--danger); }
+.pv-seam.seam-unknown { background: #fff3e0; color: #e65100; border-color: var(--warn); }
+.pv-pool-wrap {
+  flex: 0 0 250px; display: flex; flex-direction: column; border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px; min-height: 0;
+}
+.pv-pool-wrap h4 { margin: 0 0 6px; font-size: 12px; color: #455a64; }
+.pv-filter { margin-bottom: 6px; padding: 4px 6px; font-size: 12px; }
+#pv-pool { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1 1 auto; }
+#pv-pool li {
+  padding: 4px 8px; font-size: 12px; border-radius: 4px; margin-bottom: 3px;
+  background: #eceff1; cursor: pointer;
+}
+#pv-pool li:hover { background: #b2dfdb; }
+#pv-pool li.hint { background: none; cursor: default; color: var(--muted); }
+.pv-summary { font-size: 12px; padding: 6px 2px; color: #455a64; border-top: 1px solid var(--border); margin-top: 8px; }
+.pv-ok { color: #00695c; font-weight: 700; }
+.pv-bad { color: var(--danger); font-weight: 700; }
+.pv-warn { color: var(--warn); font-weight: 700; }
+
+/* 参数编辑模态框 */
+.gparam label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.gparam label.chk { flex-direction: row; align-items: center; color: var(--text); }

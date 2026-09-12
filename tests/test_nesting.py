@@ -512,5 +512,150 @@ class TestDefectAvoidance(unittest.TestCase):
             os.unlink(tmp)
 
 
+class TestGrainMatchingGroups(unittest.TestCase):
+    """拼纹对花组：组次序/同带/周期相位/同板/跨板/受阻解释/方案排序"""
+
+    def base(self, grain='vertical', period=240, nsheets=1, parts=None, groups=None):
+        return {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [{"id": "S1", "name": "板", "width": 2440, "height": 1220,
+                        "grain": grain, "quantity": nsheets,
+                        "grainPeriod": period, "grainBase": {"x": 0, "y": 0}}],
+            "parts": parts or [
+                {"id": "P1", "name": "门板", "width": 500, "height": 350,
+                 "quantity": 3, "rotatable": True, "grain": "none"}],
+            "grainGroups": groups or [
+                {"id": "G1", "dir": "h", "productGap": 2, "tolerance": 2,
+                 "sameSheet": True, "members": ["P1#1", "P1#2", "P1#3"]}],
+        }
+
+    def test_vertical_grain_lateral_seams_zero_offset(self):
+        lay = generate_layouts(self.base())["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")
+        self.assertEqual(lay["stats"]["groupComplete"], 1)
+        self.assertEqual(lay["stats"]["maxSeamOffset"], 0)
+        self.assertTrue(all(s["offset"] == 0 and s["qualified"] for s in g["seams"]))
+        # 同带：y 相同；次序沿 x
+        ps = [p for s in lay["sheets"] for p in s["placements"] if p["groupId"]]
+        ps.sort(key=lambda p: p["memberIndex"])
+        self.assertEqual([p["uid"] for p in ps], ["P1#1", "P1#2", "P1#3"])
+        self.assertEqual(len({p["y"] for p in ps}), 1)
+
+    def test_longitudinal_offset_wrap_with_period(self):
+        # 横纹横排：纹理轴与拼链同向，板上净距=5、成品间隙=2 → wrap(3,240)=3
+        lay = generate_layouts(self.base(grain='horizontal'))["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")  # 容差 2 时…
+        # 容差 2 < 3 → 引擎应改用周期位置（净距=2+240=242 → 错花量 0）
+        offsets = [s["offset"] for s in g["seams"]]
+        self.assertTrue(all(abs(o) <= 2 + 1e-6 for o in offsets), f"接缝错花量 {offsets}")
+        ps = sorted((p for s in lay["sheets"] for p in s["placements"]
+                     if p["groupId"] == "G1"), key=lambda p: p["memberIndex"])
+        self.assertAlmostEqual(ps[1]["x"] - (ps[0]["x"] + ps[0]["w"]), 242, delta=1e-6)
+
+    def test_zero_period_blocks_longitudinal_group(self):
+        # 横纹 + 未记录周期 + 沿纹理对花要求 → 同板组失败，列明全部受阻成员
+        p = self.base(grain='horizontal', period=0)
+        lay = generate_layouts(p)["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "failed")
+        self.assertEqual(lay["stats"]["unplacedCount"], 3)
+        self.assertEqual(lay["stats"]["groupComplete"], 0)
+        for u in lay["unplaced"]:
+            self.assertTrue(u["groupBlocked"])
+            self.assertEqual(u["groupId"], "G1")
+            self.assertIn("周期", u["reason"])
+
+    def test_same_sheet_required_oversize_lists_members(self):
+        p = self.base()
+        p["parts"][0]["quantity"] = 6
+        p["grainGroups"][0]["members"] = ["P1#%d" % i for i in range(1, 7)]
+        lay = generate_layouts(p)["layouts"][0]
+        self.assertEqual(lay["grainGroups"][0]["status"], "failed")
+        self.assertEqual(lay["stats"]["unplacedCount"], 6)
+        self.assertTrue(any("超出" in u["reason"] for u in lay["unplaced"]))
+
+    def test_cross_sheet_split_allowed(self):
+        # 窄板：一张放不下 3 件横排；允许跨板 → 拆开且接缝按相位复核
+        p = self.base(nsheets=2)
+        p["sheets"][0]["width"] = 1300
+        p["grainGroups"][0]["sameSheet"] = False
+        lay = generate_layouts(p)["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")
+        used_sheets = {m["sheetIndex"] for m in g["members"] if m["sheetIndex"] is not None}
+        self.assertGreater(len(used_sheets), 1)
+        # 跨板接缝（基点相同、同带）错花量为 0
+        cross = [s for s in g["seams"] if s["fromSheet"] != s["toSheet"]]
+        self.assertTrue(cross)
+        self.assertTrue(all(s["offset"] == 0 and s["qualified"] for s in cross))
+
+    def test_same_sheet_forbidden_split_fails(self):
+        p = self.base(nsheets=2)
+        p["sheets"][0]["width"] = 1300
+        p["grainGroups"][0]["sameSheet"] = True
+        lay = generate_layouts(p)["layouts"][0]
+        self.assertEqual(lay["grainGroups"][0]["status"], "failed")
+        self.assertTrue(all("同一张板" in u["reason"] for u in lay["unplaced"]))
+
+    def test_mismatched_period_cross_sheet_unknown(self):
+        # 两板周期不同 → 跨板接缝 unknown，组不完整（迫使使用两张不同型号的板）
+        p = {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [
+                {"id": "S1", "name": "板A", "width": 1300, "height": 1220,
+                 "grain": "vertical", "quantity": 1,
+                 "grainPeriod": 240, "grainBase": {"x": 0, "y": 0}},
+                {"id": "S2", "name": "板B", "width": 1300, "height": 1220,
+                 "grain": "vertical", "quantity": 1,
+                 "grainPeriod": 300, "grainBase": {"x": 0, "y": 0}},
+            ],
+            "parts": [{"id": "P1", "name": "门板", "width": 500, "height": 350,
+                       "quantity": 3, "rotatable": True, "grain": "none"}],
+            "grainGroups": [{"id": "G1", "dir": "h", "productGap": 2, "tolerance": 2,
+                             "sameSheet": False,
+                             "members": ["P1#1", "P1#2", "P1#3"]}],
+        }
+        lay = generate_layouts(p)["layouts"][0]
+        g = lay["grainGroups"][0]
+        # S1 宽 1300（可用 1290）放不下 3×500 横排 → 至少一条跨到 S2
+        used = {m["sheetId"] for m in g["members"] if m["sheetId"]}
+        self.assertIn("S2", used)
+        self.assertFalse(g["status"] == "complete" and g["unknownSeamCount"] == 0)
+        self.assertGreaterEqual(g["unknownSeamCount"], 1)
+
+    def test_group_members_are_atomic_no_loose_fill(self):
+        # 整组放不下时成员不得以散件身份补位（保持整组未放置）
+        p = self.base(grain='horizontal', period=0)
+        lay = generate_layouts(p)["layouts"][0]
+        self.assertEqual(lay["stats"]["placedCount"], 0)
+
+    def test_layout_ranking_prefers_complete_groups(self):
+        # 有拼纹组的方案排序：完整组数优先于利用率
+        lay = generate_layouts(self.base())["layouts"][0]
+        self.assertEqual(lay["stats"]["groupComplete"], 1)
+        self.assertEqual(lay["stats"]["maxSeamOffset"], 0)
+
+    def test_vertical_group_dir(self):
+        # 纵拼：成员沿 y 成列，同带（x 相同）
+        p = self.base(grain='horizontal')  # 横纹纵排 → 纹理沿拼缝，带向相位
+        p["grainGroups"][0]["dir"] = "v"
+        p["grainGroups"][0]["tolerance"] = 0
+        lay = generate_layouts(p)["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")
+        ps = sorted((q for s in lay["sheets"] for q in s["placements"]
+                     if q["groupId"] == "G1"), key=lambda q: q["memberIndex"])
+        self.assertEqual(len({q["x"] for q in ps}), 1)
+        self.assertTrue(all(s["offset"] == 0 for s in g["seams"]))
+
+    def test_sheet_period_base_passed_through(self):
+        lay = generate_layouts(self.base())["layouts"][0]
+        s0 = lay["sheets"][0]
+        self.assertEqual(s0["grainPeriod"], 240)
+        self.assertEqual(s0["grainBase"], {"x": 0, "y": 0})
+
+
 if __name__ == "__main__":
     unittest.main()

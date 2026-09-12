@@ -47,10 +47,29 @@ const Print = {
     const steps = this.planSteps(plan, idx);
     const fs = Math.max(W, H) / 55;  // 随板尺寸缩放的字体
 
+    // 原料板纹理信息（周期/基点/纹理方向）
+    const period = +(si.grainPeriod != null ? si.grainPeriod : def.grainPeriod) || 0;
+    const gb = si.grainBase || def.grainBase || { x: 0, y: 0 };
+    const grainDir = si.grain || def.grain || 'none';
+
     let s = '';
     // 板材外形与留边
     s += `<rect x="0" y="0" width="${W}" height="${H}" fill="#faf6ec" stroke="#333" stroke-width="${fs * 0.12}"/>`;
     if (m > 0) s += `<rect x="${m}" y="${m}" width="${W - 2 * m}" height="${H - 2 * m}" fill="none" stroke="#999" stroke-width="${fs * 0.06}" stroke-dasharray="${fs * 0.4} ${fs * 0.25}"/>`;
+
+    // 纹理相位参照线（打印稿标出相位基准）
+    if (period > 0) {
+      const bx = +gb.x || 0, by = +gb.y || 0;
+      if (grainDir === 'vertical') {
+        for (let x = bx % period; x <= W + 1; x += period)
+          s += `<line x1="${fmtNum(x)}" y1="0" x2="${fmtNum(x)}" y2="${H}" stroke="#00897b" stroke-width="${fs * 0.04}" stroke-opacity=".5" stroke-dasharray="${fs * 0.5} ${fs * 0.3}"/>`;
+      } else if (grainDir === 'horizontal') {
+        for (let y = by % period; y <= H + 1; y += period)
+          s += `<line x1="0" y1="${fmtNum(y)}" x2="${W}" y2="${fmtNum(y)}" stroke="#00897b" stroke-width="${fs * 0.04}" stroke-opacity=".5" stroke-dasharray="${fs * 0.5} ${fs * 0.3}"/>`;
+      }
+      s += `<circle cx="${bx}" cy="${by}" r="${fs * 0.5}" fill="#00695c"/>` +
+           `<text x="${bx + fs * 0.7}" y="${by + fs * 0.3}" font-size="${fs * 0.55}" fill="#00695c" font-weight="bold">相位基准 (${fmtNum(bx)},${fmtNum(by)}) T=${fmtNum(period)}</text>`;
+    }
 
     // 尺寸标注：顶边宽、左边高
     s += this.dimLine(0, -pad * 0.45, W, -pad * 0.45, `${fmtNum(W)}`, fs, 'h');
@@ -113,10 +132,53 @@ const Print = {
         s += `<text x="${p.x + p.w / 2}" y="${p.y + p.h / 2}" font-size="${fs * 0.7}" text-anchor="middle" fill="#222">${name}</text>`;
         s += `<text x="${p.x + p.w / 2}" y="${p.y + p.h / 2 + fs * 0.85}" font-size="${fs * 0.6}" text-anchor="middle" fill="#444">${fmtNum(p.w)}×${fmtNum(p.h)}${p.rotated ? ' ⟳' : ''}</text>`;
       }
+      // 拼纹组徽标：组号 + 安装次序
+      if (typeof Grain !== 'undefined') {
+        const grp = Grain.groupOf(p.uid);
+        if (grp) {
+          const mi = grp.members.indexOf(p.uid) + 1;
+          const label = `${grp.id}-${mi}`;
+          const bw = fs * 1.5;
+          s += `<rect x="${p.x + p.w - bw - fs * 0.2}" y="${p.y + fs * 0.2}" width="${bw}" height="${fs * 0.9}" rx="${fs * 0.15}" fill="#00695c"/>` +
+               `<text x="${p.x + p.w - bw / 2 - fs * 0.2}" y="${p.y + fs * 0.85}" font-size="${fs * 0.6}" fill="#fff" text-anchor="middle" font-weight="bold">${label}</text>`;
+        }
+      }
     });
 
+    // 拼纹接缝（组号、安装次序、错花量；超限红色）
+    if (typeof Grain !== 'undefined') {
+      (App.violations.grainSeams || []).forEach((sm) => {
+        if (sm.fromSheet !== idx && sm.toSheet !== idx) return;
+        const color = sm.qualified ? '#00897b' : (sm.status === 'unknown' ? '#ef6c00' : '#c62828');
+        const drawHalf = (which) => {
+          const e = sm[which];
+          if (e.sheetIndex !== idx) return '';
+          if (sm.axis === 'x') {
+            return `<line x1="${e.x}" y1="${e.y}" x2="${e.x}" y2="${e.y + e.h}" stroke="${color}" stroke-width="${fs * 0.14}" stroke-dasharray="${fs * 0.5} ${fs * 0.3}"/>`;
+          }
+          return `<line x1="${e.x}" y1="${e.y}" x2="${e.x + e.w}" y2="${e.y}" stroke="${color}" stroke-width="${fs * 0.14}" stroke-dasharray="${fs * 0.5} ${fs * 0.3}"/>`;
+        };
+        s += drawHalf('fromEdge') + drawHalf('toEdge');
+        if (sm.toSheet === idx) {
+          const e = sm.toEdge;
+          let cx, cy;
+          if (sm.axis === 'x') {
+            cx = sm.fromSheet === idx ? (sm.fromEdge.x + sm.toEdge.x) / 2 : e.x - fs;
+            cy = e.y + e.h / 2;
+          } else {
+            cx = e.x + e.w / 2;
+            cy = sm.fromSheet === idx ? (sm.fromEdge.y + sm.toEdge.y) / 2 : e.y - fs;
+          }
+          const txt = sm.status === 'unknown' ? `${sm.groupId} 相位?`
+            : `${sm.groupId} Δ${fmtNum(sm.offset)}/${fmtNum(sm.tolerance)}`;
+          s += `<rect x="${cx - fs * 1.6}" y="${cy - fs * 0.55}" width="${fs * 3.2}" height="${fs * 0.95}" rx="${fs * 0.15}" fill="#fff" stroke="${color}" stroke-width="${fs * 0.05}"/>` +
+               `<text x="${cx}" y="${cy + fs * 0.3}" font-size="${fs * 0.55}" fill="${color}" text-anchor="middle" font-weight="bold">${esc(txt)}</text>`;
+        }
+      });
+    }
+
     return { svg: `<svg viewBox="${-pad} ${-pad} ${W + pad * 2} ${H + pad * 2}" xmlns="http://www.w3.org/2000/svg">${s}</svg>`,
-             parts, steps, def, W, H, defects };
+             parts, steps, def, W, H, defects, grainPeriod: period, grainBase: gb, grainDir };
   },
 
   dimLine(x1, y1, x2, y2, text, fs, dir) {
@@ -153,12 +215,36 @@ const Print = {
     }
     let totalDefects = 0;
     lay.sheets.forEach(si => { totalDefects += App.defectsOn(si.sheetId, si.instance).length; });
+    const grpEv = (typeof Grain !== 'undefined') ? Grain.evaluate(lay) : null;
     let body = `
       <h1>${name} — 裁切排样图</h1>
       <p class="meta">生成时间：${now} · 锯缝 ${fmtNum(sett.kerf)}mm · 板边留量 ${fmtNum(sett.margin)}mm · 零件间距 ${fmtNum(sett.spacing)}mm</p>
       <p class="meta">合格零件 <b>${st.qualifiedCount != null ? st.qualifiedCount : st.placedCount}</b> / 已放置 ${st.placedCount} 件 / 未放置 ${st.unplacedCount} 件 · 用板 ${st.usedSheets}/${st.totalSheets} 张 · 利用率 ${fmtPct(st.utilization)} · 避让碎料 ${fmtArea(st.defectScrap || 0)} · 约 ${st.cuts} 刀（估算）</p>`;
     if (totalDefects) {
       body += `<p class="meta">板面缺陷共 ${totalDefects} 处（彩色填充为缺陷核心轮廓，同色虚线为安全外扩边界，圆圈内为缺陷编号）</p>`;
+    }
+    if (grpEv && grpEv.totalGroups) {
+      body += `<p class="meta"><b>拼纹对花：</b>完整落板 ${grpEv.completeCount}/${grpEv.totalGroups} 组 · 最大接缝偏差 ${fmtNum(grpEv.maxOffset)}mm${lay.adopted ? ' · <b>本方案已采纳</b>' : ''}</p>`;
+      const grows = grpEv.groups.map((g) => {
+        const seams = lay.grainGroups ? (lay.grainGroups.find(x => x.id === g.id) || {}).seams || [] : [];
+        const seamTxt = seams.map(sm =>
+          `${esc(sm.from)}→${esc(sm.to)}：${sm.status === 'unknown' ? '相位?' : fmtNum(sm.offset) + 'mm'}` +
+          (sm.qualified ? '' : `（限${fmtNum(sm.tolerance)}，超限）`)).join('；');
+        const order = g.members.map((m, i) => `${i + 1}.${esc(m.uid)}${m.onBoard ? '' : '(未放置)'}`).join(' ');
+        const phaseBases = [...new Set(g.members.filter(m => m.onBoard).map(m => {
+          const si = lay.sheets[m.sheetIndex];
+          const bb = si.grainBase || (App.sheetDef(si.sheetId) || {}).grainBase || { x: 0, y: 0 };
+          return `${si.sheetId}#${si.instance + 1}(${fmtNum(bb.x)},${fmtNum(bb.y)})`;
+        }))].join('、');
+        return `<tr><td><b>${esc(g.id)}</b></td>` +
+          `<td>${g.dir === 'h' ? '横拼' : '纵拼'}</td>` +
+          `<td>${fmtNum(g.productGap)}</td><td>${fmtNum(g.tolerance)}</td>` +
+          `<td>${g.sameSheet ? '是' : '否'}</td>` +
+          `<td>${g.status === 'complete' ? '✓ 完整' : g.status === 'failed' ? '✗ 未落板' : '⚠ 部分'}</td>` +
+          `<td>${order}</td><td>${esc(phaseBases || '—')}</td><td>${esc(seamTxt || '—')}</td></tr>`;
+      }).join('');
+      body += `<section class="sheet-page"><h2>拼纹对花组清单（安装次序、相位基准与接缝偏差）</h2>
+        <table><thead><tr><th>组号</th><th>拼法</th><th>成品间隙</th><th>错花容差</th><th>同板</th><th>状态</th><th>安装次序</th><th>相位基准（基点）</th><th>接缝错花量</th></tr></thead><tbody>${grows}</tbody></table></section>`;
     }
     if (cutData) {
       body += `
@@ -175,10 +261,13 @@ const Print = {
         `<td>${fmtNum(s.board.w)} × ${fmtNum(s.board.h)}</td>` +
         `<td>${fmtNum(s.dir === 'v' ? s.board.h : s.board.w)}</td>` +
         `<td>${esc(this.producesLabel(s))}</td></tr>`).join('');
-      const partRows = r.parts.map(p =>
-        `<tr><td>${p.no}</td><td>${esc(p.uid)}</td><td>${esc(p.name || p.partId)}</td>` +
-        `<td>${fmtNum(p.w)} × ${fmtNum(p.h)}</td><td>(${fmtNum(p.x)}, ${fmtNum(p.y)})</td>` +
-        `<td>${p.rotated ? '已旋转 90°' : '未旋转'}</td></tr>`).join('');
+      const partRows = r.parts.map(p => {
+        const grp = (typeof Grain !== 'undefined') ? Grain.groupOf(p.uid) : null;
+        return `<tr><td>${p.no}</td><td>${esc(p.uid)}</td><td>${esc(p.name || p.partId)}</td>` +
+          `<td>${fmtNum(p.w)} × ${fmtNum(p.h)}</td><td>(${fmtNum(p.x)}, ${fmtNum(p.y)})</td>` +
+          `<td>${p.rotated ? '已旋转 90°' : '未旋转'}</td>` +
+          `<td>${grp ? esc(grp.id) + '（第' + (grp.members.indexOf(p.uid) + 1) + '件）' : '—'}</td></tr>`;
+      }).join('');
       let defectHtml = '';
       if (r.defects.length) {
         const drows = r.defects.map((d) => {
@@ -205,14 +294,14 @@ const Print = {
       }
       body += `
         <section class="sheet-page">
-          <h2>板材 #${idx + 1}：${esc(si.sheetId)} ${esc(si.name || '')}（${fmtNum(r.W)}×${fmtNum(r.H)} mm，${si.placements.length} 件）</h2>
+          <h2>板材 #${idx + 1}：${esc(si.sheetId)} ${esc(si.name || '')}（${fmtNum(r.W)}×${fmtNum(r.H)} mm，${si.placements.length} 件${r.grainPeriod ? '，纹理' + ({ vertical: '纵向', horizontal: '横向' }[r.grainDir] || '') + ' 周期 ' + fmtNum(r.grainPeriod) + 'mm' : ''}）</h2>
           ${r.svg}
           ${defectHtml}
           <h3>裁切工序（切割顺序，图中蓝色编号即顺序）</h3>
           <table><thead><tr><th>顺序</th><th>类型</th><th>切线位置 (mm)</th><th>切前子板 (mm)</th><th>行程 (mm)</th><th>产出</th></tr></thead><tbody>${cutRows || '<tr><td colspan="6">—</td></tr>'}</tbody></table>
           ${manualHtml}
           <h3>零件清单（位置为板材左上角原点坐标）</h3>
-          <table><thead><tr><th>编号</th><th>标识</th><th>名称</th><th>尺寸 (mm)</th><th>位置 (x, y)</th><th>方向</th></tr></thead><tbody>${partRows}</tbody></table>
+          <table><thead><tr><th>编号</th><th>标识</th><th>名称</th><th>尺寸 (mm)</th><th>位置 (x, y)</th><th>方向</th><th>拼纹组（安装次序）</th></tr></thead><tbody>${partRows}</tbody></table>
         </section>`;
     });
 

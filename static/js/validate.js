@@ -19,7 +19,7 @@ const Validate = {
     const dmap = new Map();
     const messages = [];
     const lay = App.layout();
-    if (!lay) return { vmap, dmap, messages };
+    if (!lay) return { vmap, dmap, messages, grainSeams: [], grainGroups: [] };
     const gap = this.gap();
     const margin = this.margin();
     const seenMsg = new Set();
@@ -126,7 +126,48 @@ const Validate = {
         }
       }
     });
-    return { vmap, dmap, messages };
+    // 拼纹对花：逐缝错花量、同板要求、组完整性（与后端同口径）
+    const grain = (typeof Grain !== 'undefined') ? Grain.evaluate(lay)
+      : { groups: [], seams: [], badUids: new Set(), completeCount: 0, totalGroups: 0 };
+    grain.groups.forEach((g) => {
+      // 组内成员缺失/未放置
+      g.members.forEach((m) => {
+        if (!m.onBoard) {
+          flag(m.uid, 'grainmatch');
+          say(m.uid, 'grainmatch',
+            `拼纹组 ${g.id} 成员 ${m.uid} 未放置（组不完整，无法对花）`, null);
+        }
+      });
+      if (g.sameSheetViolation) {
+        g.members.forEach((m) => flag(m.uid, 'grainmatch'));
+        say(null, 'grainmatch',
+          `拼纹组 ${g.id} 要求全部取自同一张板，但当前分布在多张板上`, null);
+      }
+    });
+    grain.seams.forEach((s) => {
+      if (s.qualified) return;
+      flag(s.from, 'grainmatch');
+      flag(s.to, 'grainmatch');
+      let msg;
+      if (s.status === 'unknown') {
+        msg = `拼纹组 ${s.groupId} 接缝 ${s.from}–${s.to}：${s.reason || '相位无法核算'}` +
+              (s.crossSheet ? '（跨板）' : '');
+      } else {
+        msg = `拼纹组 ${s.groupId} 接缝 ${s.from}–${s.to} 错花量 ${fmtNum(s.offset)}mm ` +
+              `超过可接受值 ${fmtNum(s.tolerance)}mm` + (s.band ? '（错带）' : '') +
+              (s.crossSheet ? '（跨板）' : '');
+      }
+      say(null, 'grainmatch', msg, { type: 'seam', groupId: s.groupId,
+                                     from: s.from, to: s.to,
+                                     sheetIndex: s.toSheet });
+    });
+
+    return { vmap, dmap, messages,
+             grainSeams: grain.seams, grainGroups: grain.groups,
+             grainSummary: { completeCount: grain.completeCount,
+                             totalGroups: grain.totalGroups,
+                             maxOffset: grain.maxOffset,
+                             allQualified: grain.allQualified } };
   },
 
   /* 拖拽过程中的快速校验：候选位置是否合法（越界 / 间距 / 重叠 / 板材纹理 / 缺陷） */

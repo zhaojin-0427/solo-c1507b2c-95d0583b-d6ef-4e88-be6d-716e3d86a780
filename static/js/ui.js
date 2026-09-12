@@ -7,6 +7,7 @@ const UI = {
     tb.innerHTML = '';
     App.sheets.forEach((s, i) => {
       const tr = document.createElement('tr');
+      const gb = s.grainBase || { x: 0, y: 0 };
       tr.innerHTML = `
         <td><input type="text" data-k="name" value="${esc(s.name)}"></td>
         <td><input type="number" data-k="width" value="${s.width}" min="1" style="width:58px"></td>
@@ -17,13 +18,25 @@ const UI = {
           <option value="horizontal"${s.grain === 'horizontal' ? ' selected' : ''}>横向</option>
           <option value="vertical"${s.grain === 'vertical' ? ' selected' : ''}>纵向</option>
         </select></td>
+        <td><input type="number" data-k="grainPeriod" value="${s.grainPeriod || 0}" min="0" step="1" style="width:52px" title="纹理重复周期 mm，0=未记录"></td>
+        <td><input type="text" data-k="grainBaseText" value="${fmtNum(gb.x)},${fmtNum(gb.y)}" style="width:64px" title="定位基点 x,y"></td>
         <td><button class="del-btn" title="删除">✕</button></td>`;
       tr.querySelectorAll('input,select').forEach(inp => {
         inp.addEventListener('change', () => {
           const k = inp.dataset.k;
-          s[k] = (k === 'name' || k === 'grain') ? inp.value : Math.max(1, +inp.value || 1);
-          if (k !== 'name' && k !== 'grain') Main.onStructureChanged();
-          else renderAll();
+          if (k === 'grainBaseText') {
+            const m = /^\s*(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)\s*$/.exec(inp.value || '');
+            if (m) s.grainBase = { x: +m[1], y: +m[2] };
+            else { toast('基点格式应为 x,y，例如 0,0'); inp.value = `${fmtNum((s.grainBase||{x:0}).x||0)},${fmtNum((s.grainBase||{y:0}).y||0)}`; return; }
+          } else if (k === 'name' || k === 'grain') {
+            s[k] = inp.value;
+          } else if (k === 'grainPeriod') {
+            s.grainPeriod = Math.max(0, +inp.value || 0);
+          } else {
+            s[k] = Math.max(1, +inp.value || 1);
+          }
+          if (k === 'width' || k === 'height' || k === 'quantity') Main.onStructureChanged();
+          else { App.pushHistory(); renderAll(); }
         });
       });
       tr.querySelector('.del-btn').addEventListener('click', () => {
@@ -85,13 +98,16 @@ const UI = {
     App.layouts.forEach((lay, i) => {
       const st = lay.stats;
       const b = document.createElement('button');
-      b.className = 'layout-tab' + (i === App.active ? ' active' : '');
+      b.className = 'layout-tab' + (i === App.active ? ' active' : '') + (lay.adopted ? ' adopted' : '');
       if (lay.empty) {
         b.innerHTML = `<div class="t">待排样</div><div class="s">尚未生成排样方案，板面缺陷已可登记，生成排样后自动避让</div>`;
       } else {
       const badQ = st.qualifiedCount != null && st.qualifiedCount < st.placedCount;
-      b.innerHTML = `<div class="t">方案 ${i + 1} <span class="s">(${esc(lay.strategy || '')})</span></div>
-        <div class="s">合格 ${st.qualifiedCount != null ? st.qualifiedCount : st.placedCount}/${st.placedCount} · 利用率 ${fmtPct(st.utilization)} · 用板 ${st.usedSheets}/${st.totalSheets} · 避让碎料 ${fmtArea(st.defectScrap || 0)} · ${st.cuts} 刀` +
+      const gTxt = st.groupTotal
+        ? ` · 拼纹组 <b class="${st.groupComplete === st.groupTotal ? 'g-ok' : 'g-bad'}">${st.groupComplete}/${st.groupTotal}</b>` +
+          ` · 最大偏差 ${fmtNum(st.maxSeamOffset || 0)}` : '';
+      b.innerHTML = `<div class="t">${lay.adopted ? '✔ ' : ''}方案 ${i + 1} <span class="s">(${esc(lay.strategy || '')})</span></div>
+        <div class="s">合格 ${st.qualifiedCount != null ? st.qualifiedCount : st.placedCount}/${st.placedCount} · 利用率 ${fmtPct(st.utilization)} · 用板 ${st.usedSheets}/${st.totalSheets}${gTxt} · 避让碎料 ${fmtArea(st.defectScrap || 0)} · ${st.cuts} 刀` +
         (st.unplacedCount ? ` · <span class="bad">未放 ${st.unplacedCount}</span>` : '') +
         (badQ ? ` · <span class="bad">冲突 ${st.defectConflictCount}</span>` : '') + `</div>`;
       }
@@ -179,6 +195,7 @@ const UI = {
       <div class="row"><label>位置 Y</label><input id="sel-y" type="number" step="1" value="${p.y}"></div>
       <div class="row"><label>所在板</label><select id="sel-sheet">${sheetOpts}</select></div>
       <div class="row"><label>锁定</label><input id="sel-lock" type="checkbox"${p.locked ? ' checked' : ''}></div>
+      <div class="row"><label>拼纹组</label><span id="sel-grain"></span></div>
       ${pd ? `<div class="row"><label>容缺</label><span class="hint">${
         { any: '正反面均可', front: '正面须无缺陷', back: '反面须无缺陷', both: '双面均须无缺陷' }[pd.faceReq || 'any']
       } · ${(+pd.allowGrade || 0) ? `容许≤${pd.allowGrade}级` : '不容许缺陷'} · 容许区 ${(pd.allowZones || []).length} 处
@@ -205,11 +222,69 @@ const UI = {
       renderAll();
     });
     body.querySelector('#sel-lock').addEventListener('change', () => Main.toggleLock());
+    this.renderSelGrain(uid);
     body.querySelector('#sel-rotate').addEventListener('click', () => Main.rotateSelected());
     body.querySelector('#sel-delete').addEventListener('click', () => Main.deleteSelected());
     if (pd && body.querySelector('#sel-tol')) {
       body.querySelector('#sel-tol').addEventListener('click', () => PartTol.openModal(pd));
     }
+  },
+
+  /* 选中零件的拼纹组归属行 */
+  renderSelGrain(uid) {
+    const span = document.getElementById('sel-grain');
+    if (!span) return;
+    const g = (typeof Grain !== 'undefined') ? Grain.groupOf(uid) : null;
+    const opts = ['<option value="">（不拼花）</option>']
+      .concat(App.grainGroups.map(x =>
+        `<option value="${x.id}"${g && g.id === x.id ? ' selected' : ''}>${x.id} · ${x.dir === 'h' ? '横拼' : '纵拼'} · 第 ${x.members.indexOf(uid) + 1} 件</option>`))
+      .concat(['<option value="__new__">＋ 新建拼纹组…</option>']);
+    span.innerHTML = `<select id="sel-grain-sel" style="flex:1">${opts.join('')}</select>
+      <button id="sel-grain-open" class="mini-btn" title="打开装配预览">预览</button>`;
+    span.querySelector('#sel-grain-sel').addEventListener('change', (e) => {
+      if (e.target.value === '__new__') {
+        // 还原下拉到当前值，新建组并把该件加入
+        e.target.value = g ? g.id : '';
+        const ng = { id: App.nextGroupId(), dir: 'h', productGap: 2, tolerance: 2, sameSheet: true, members: [uid] };
+        App.removeFromGroup(uid);
+        App.grainGroups.push(ng);
+        App.pushHistory();
+        renderAll();
+        GrainUI.editGroup(ng.id, true);
+        return;
+      }
+      if (e.target.value) App.setGroupMembership(uid, e.target.value);
+      else App.removeFromGroup(uid);
+      App.pushHistory();
+      renderAll();
+    });
+    span.querySelector('#sel-grain-open').addEventListener('click', () => {
+      if (g) GrainUI.openPreview(g.id);
+      else toast('该零件尚未加入拼纹组');
+    });
+  },
+
+  /* ---- 拼纹工具条状态 ---- */
+  renderGrainToolbar() {
+    const info = document.getElementById('grain-toolbar-info');
+    const btnR = document.getElementById('btn-grain-restore');
+    const btnA = document.getElementById('btn-adopt');
+    if (!info) return;
+    const lay = App.layout();
+    if (!lay || lay.empty) {
+      info.textContent = ''; btnR.disabled = true; btnA.disabled = true;
+      return;
+    }
+    btnA.disabled = false;
+    const ev = (typeof Grain !== 'undefined') ? Grain.evaluate(lay) : null;
+    if (ev && ev.totalGroups) {
+      info.innerHTML = `拼纹组完整 <b class="${ev.allQualified ? 'g-ok' : 'g-bad'}">${ev.completeCount}/${ev.totalGroups}</b>` +
+        ` · 最大接缝偏差 ${fmtNum(ev.maxOffset)}mm`;
+    } else {
+      info.textContent = '';
+    }
+    btnR.disabled = !Grain.hasCheckpoint(lay);
+    btnA.textContent = lay.adopted ? '✔ 已采纳（点击改采纳其它方案）' : '✔ 采纳本方案';
   },
 
   /* ---- 定位：切换到目标板材并缩放定位，选中零件/缺陷 ---- */
@@ -252,12 +327,17 @@ const UI = {
       const li = document.createElement('li');
       if (m.code === 'spacing') li.className = 'warn';
       if (m.code === 'grain' || m.code === 'size' || m.code === 'nodef') li.className = 'info';
+      if (m.code === 'grainmatch') li.className = 'grain-msg';
       if (m.code === 'defect' || m.code === 'defout') li.className = 'defect-msg';
       li.textContent = m.msg;
       li.title = '点击定位';
       li.addEventListener('click', () => {
         if (m.loc && (m.loc.type === 'defect' || m.loc.type === 'partdefect')) {
           UI.locateDefect(m.loc);
+        } else if (m.loc && m.loc.type === 'seam') {
+          if (typeof Defects !== 'undefined') Defects.focusSheet(m.loc.sheetIndex);
+          App.selected = m.loc.to;
+          renderAll();
         } else if (m.loc && m.loc.sheetIndex != null) {
           App.selected = m.uid;
           UI.focusSheet(m.loc.sheetIndex);
@@ -372,8 +452,10 @@ const UI = {
     const lay = App.layout();
     if (!lay) { el.textContent = '就绪'; return; }
     const st = lay.stats;
+    const gs = (st.groupTotal != null && st.groupTotal)
+      ? ` · 拼纹组 ${st.groupComplete}/${st.groupTotal} · 最大偏差 ${fmtNum(st.maxSeamOffset || 0)}` : '';
     el.textContent = `已放置 ${st.placedCount} 件（合格 ${st.qualifiedCount != null ? st.qualifiedCount : st.placedCount}）· 未放置 ${st.unplacedCount} 件 · ` +
-      `利用率 ${fmtPct(st.utilization)} · 避让碎料 ${fmtArea(st.defectScrap || 0)} · 约 ${st.cuts} 刀`;
+      `利用率 ${fmtPct(st.utilization)} · 避让碎料 ${fmtArea(st.defectScrap || 0)} · 约 ${st.cuts} 刀${gs}`;
   },
 
   updateUndoRedo() {

@@ -122,6 +122,8 @@ const Canvas = {
         width: Math.max(0, off.w - 2 * margin), height: Math.max(0, off.h - 2 * margin),
       }, g);
     }
+    // 纹理相位参照线（原料板记录了重复周期时）
+    this.renderPhaseGrid(g, si, off, def);
     // 板材纹理方向示意
     if (def.grain && def.grain !== 'none') {
       const step = 90;
@@ -139,20 +141,106 @@ const Canvas = {
     const label = this.el('text', { class: 'sheet-label', x: 0, y: -46 }, g);
     label.textContent = `${si.sheetId} ${def.name || ''} #${si.instance + 1}`;
     const sub = this.el('text', { class: 'sheet-sub', x: 0, y: -14 }, g);
-    sub.textContent = `${fmtNum(off.w)}×${fmtNum(off.h)} mm · ${si.placements.length} 件 · 利用率 ${fmtPct(util)}`;
+    const period = +(si.grainPeriod != null ? si.grainPeriod : def.grainPeriod) || 0;
+    sub.textContent = `${fmtNum(off.w)}×${fmtNum(off.h)} mm · ${si.placements.length} 件 · 利用率 ${fmtPct(util)}` +
+      (period ? ` · 纹理周期 ${fmtNum(period)}mm` : '');
 
     si.placements.forEach((p) => this.renderPart(g, p));
+    // 拼纹接缝层（相位错花量，超限红色高亮）
+    this.renderSeamOverlay(g, si, idx);
     // 板面缺陷（核心区 + 安全外扩边界 + 编号）覆盖在零件之上
     if (typeof Defects !== 'undefined') Defects.renderInto(g, si, idx);
+  },
+
+  /* 纹理相位参照线：垂直于纹理方向、按重复周期从基点起铺的细线 */
+  renderPhaseGrid(sheetG, si, off, def) {
+    const period = +(si.grainPeriod != null ? si.grainPeriod : def.grainPeriod) || 0;
+    if (!(period > 0)) return;
+    const gb = si.grainBase || def.grainBase || { x: 0, y: 0 };
+    const bx = +gb.x || 0, by = +gb.y || 0;
+    const grain = si.grain || def.grain || 'none';
+    const layer = this.el('g', { class: 'phase-layer' }, sheetG);
+    if (grain === 'vertical') {
+      // 纹理沿 y：相位线为竖线（沿纹理），按 x 周期
+      for (let x = bx % period; x <= off.w + 1; x += period) {
+        this.el('line', { class: 'phase-line', x1: x, y1: 0, x2: x, y2: off.h }, layer);
+      }
+    } else if (grain === 'horizontal') {
+      for (let y = by % period; y <= off.h + 1; y += period) {
+        this.el('line', { class: 'phase-line', x1: 0, y1: y, x2: off.w, y2: y }, layer);
+      }
+    } else {
+      // 无纹理方向但记了周期：双向都画（淡一点）
+      for (let x = bx % period; x <= off.w + 1; x += period)
+        this.el('line', { class: 'phase-line faint', x1: x, y1: 0, x2: x, y2: off.h }, layer);
+      for (let y = by % period; y <= off.h + 1; y += period)
+        this.el('line', { class: 'phase-line faint', x1: 0, y1: y, x2: off.w, y2: y }, layer);
+    }
+    // 定位基点标记
+    this.el('circle', { class: 'phase-base', cx: bx, cy: by, r: 6 }, layer);
+    this.el('line', { class: 'phase-base-cross', x1: bx - 10, y1: by, x2: bx + 10, y2: by }, layer);
+    this.el('line', { class: 'phase-base-cross', x1: bx, y1: by - 10, x2: bx, y2: by + 10 }, layer);
+    const t = this.el('text', { class: 'phase-base-tag', x: bx + 9, y: by + 20 }, layer);
+    t.textContent = `基点 ${fmtNum(bx)},${fmtNum(by)} · T=${fmtNum(period)}`;
+  },
+
+  /* 拼缝层：仅绘制落在本板上的接缝段（跨板缝在两块板各画半边） */
+  renderSeamOverlay(sheetG, si, idx) {
+    if (typeof Grain === 'undefined') return;
+    const seams = (App.violations.grainSeams || []);
+    seams.forEach((s) => {
+      const onFrom = s.fromSheet === idx, onTo = s.toSheet === idx;
+      if (!onFrom && !onTo) return;
+      const cls = s.qualified ? 'seam-ok' : (s.status === 'unknown' ? 'seam-unknown' : 'seam-bad');
+      if (s.axis === 'x') {
+        // 竖缝
+        if (onFrom) {
+          const e = s.fromEdge;
+          this.el('line', { class: 'seam-line ' + cls, x1: e.x, y1: e.y, x2: e.x, y2: e.y + e.h }, sheetG);
+        }
+        if (onTo) {
+          const e = s.toEdge;
+          this.el('line', { class: 'seam-line ' + cls, x1: e.x, y1: e.y, x2: e.x, y2: e.y + e.h }, sheetG);
+          const mx = onFrom ? (s.fromEdge.x + s.toEdge.x) / 2 : e.x;
+          const my = e.y + e.h / 2;
+          this.seamTag(sheetG, mx, my, s, cls);
+        }
+      } else {
+        if (onFrom) {
+          const e = s.fromEdge;
+          this.el('line', { class: 'seam-line ' + cls, x1: e.x, y1: e.y, x2: e.x + e.w, y2: e.y }, sheetG);
+        }
+        if (onTo) {
+          const e = s.toEdge;
+          this.el('line', { class: 'seam-line ' + cls, x1: e.x, y1: e.y, x2: e.x + e.w, y2: e.y }, sheetG);
+          const mx = e.x + e.w / 2;
+          const my = onFrom ? (s.fromEdge.y + s.toEdge.y) / 2 : e.y;
+          this.seamTag(sheetG, mx, my, s, cls);
+        }
+      }
+    });
+  },
+
+  seamTag(sheetG, x, y, s, cls) {
+    const g = this.el('g', { class: 'seam-tag-g' }, sheetG);
+    const txt = (s.status === 'unknown' ? '相位?' : `Δ${fmtNum(s.offset)}`) +
+      (s.qualified ? '' : `/${fmtNum(s.tolerance)}`);
+    const fs = 19;
+    const w = txt.length * fs * 0.62 + 12, h = fs + 8;
+    this.el('rect', { class: 'seam-tag-bg ' + cls, x: x - w / 2, y: y - h / 2, width: w, height: h, rx: 4 }, g);
+    const t = this.el('text', { class: 'seam-tag ' + cls, x, y: y + fs * 0.36, 'font-size': fs }, g);
+    t.textContent = txt;
   },
 
   partClass(p) {
     let cls = 'part';
     if (p.uid === App.selected) cls += ' selected';
     if (p.locked) cls += ' locked';
+    const grp = typeof Grain !== 'undefined' ? Grain.groupOf(p.uid) : null;
+    if (grp) cls += ' in-group';
     const v = App.violations.vmap.get(p.uid);
     if (v) {
-      for (const code of ['overlap', 'bounds', 'spacing', 'grain', 'nodef', 'size', 'defect']) {
+      for (const code of ['overlap', 'bounds', 'spacing', 'grain', 'nodef', 'size', 'defect', 'grainmatch']) {
         if (v.has(code)) { cls += ' v-' + code; break; }
       }
     }
@@ -196,6 +284,20 @@ const Canvas = {
     if (p.locked) {
       const t = this.el('text', { class: 'part-tag', x: 6, y: 24, 'font-size': 20 }, g);
       t.textContent = '🔒';
+    }
+    // 拼纹组徽标：组号 + 安装次序
+    if (typeof Grain !== 'undefined') {
+      const grp = Grain.groupOf(p.uid);
+      if (grp) {
+        const mi = grp.members.indexOf(p.uid) + 1;
+        const tagW = 15 + String(grp.id).length * 9 + String(mi).length * 8;
+        this.el('rect', { class: 'group-badge-bg', x: p.w - tagW - 4, y: 4,
+                          width: tagW, height: 22, rx: 4 }, g);
+        const t = this.el('text', {
+          class: 'group-badge', x: p.w - tagW / 2 - 4, y: 20, 'font-size': 15,
+        }, g);
+        t.textContent = `${grp.id}·${mi}`;
+      }
     }
     // 容缺示意：容许区（蓝色虚线）与正反面要求角标
     if (pd) {
@@ -316,6 +418,84 @@ const Canvas = {
       }
       d.node.classList.toggle('drag-invalid', !ok);
     }
+    // 拼纹接缝逐缝更新（轻量覆盖层，避免整体重绘打断拖拽）
+    if (typeof Grain !== 'undefined') this.renderDragSeams(d, nx, ny, tIdx);
+  },
+
+  /* 拖拽中实时计算被拖成员与拼纹组相邻成员的接缝错花量 */
+  renderDragSeams(drag, worldX, worldY, tIdx) {
+    let layer = this.svg.querySelector('#drag-seam-layer');
+    if (!layer) {
+      layer = this.el('g', { id: 'drag-seam-layer', class: 'drag-seam-layer' }, this.svg);
+    }
+    layer.replaceChildren();
+    const lay = App.layout();
+    const grp = Grain.groupOf(drag.uid);
+    if (!grp || !lay || tIdx < 0) return;
+    const off = this.sheetOffsets[tIdx];
+    const fakeCur = { uid: drag.uid, x: worldX - off.x, y: worldY - off.y, w: drag.w, h: drag.h };
+    const sInfoCur = Grain.sheetInfo(lay, tIdx);
+    const mi = grp.members.indexOf(drag.uid);
+    const axis = grp.dir === 'h' ? 'x' : 'y';
+    const drawTag = (x, y, seam) => {
+      const cls = Grain.seamQualified(seam, grp.tolerance)
+        ? 'seam-ok' : (seam.status === 'unknown' ? 'seam-unknown' : 'seam-bad');
+      const txt = seam.status === 'unknown' ? '相位?' : `Δ${fmtNum(seam.offset)}/${fmtNum(grp.tolerance)}`;
+      const fs = 20, w = txt.length * fs * 0.62 + 12, h = fs + 8;
+      const gg = this.el('g', {}, layer);
+      this.el('rect', { class: 'seam-tag-bg ' + cls, x: x - w / 2, y: y - h / 2, width: w, height: h, rx: 4 }, gg);
+      const t = this.el('text', { class: 'seam-tag ' + cls, x, y: y + fs * 0.36, 'font-size': fs }, gg);
+      t.textContent = txt;
+    };
+    [mi - 1, mi + 1].forEach((otherIdx) => {
+      if (otherIdx < 0 || otherIdx >= grp.members.length) return;
+      const otherUid = grp.members[otherIdx];
+      const hit = Grain.findOnBoard(lay, otherUid);
+      if (!hit) return;
+      const oOff = this.sheetOffsets[hit.sheetIndex];
+      const prevRec = otherIdx < mi
+        ? { ...hit.placement }
+        : { ...fakeCur };
+      const curRec = otherIdx < mi
+        ? { ...fakeCur }
+        : { ...hit.placement };
+      const sPrev = otherIdx < mi ? Grain.sheetInfo(lay, hit.sheetIndex) : sInfoCur;
+      const sCur = otherIdx < mi ? sInfoCur : Grain.sheetInfo(lay, hit.sheetIndex);
+      const seam = Grain.evaluateSeam(prevRec, curRec, axis, grp.productGap, sPrev, sCur);
+      const qualified = Grain.seamQualified(seam, grp.tolerance);
+      const cls = qualified ? 'seam-ok' : (seam.status === 'unknown' ? 'seam-unknown' : 'seam-bad');
+      // 在两件之间画预览缝（世界坐标）
+      if (axis === 'x') {
+        if (otherIdx < mi) {
+          // 缝在 fakeCur 左缘
+          this.el('line', { class: 'seam-line ' + cls,
+            x1: worldX, y1: worldY, x2: worldX, y2: worldY + drag.h }, layer);
+          drawTag(worldX - 10, worldY + drag.h / 2, seam);
+        } else {
+          this.el('line', { class: 'seam-line ' + cls,
+            x1: oOff.x + hit.placement.x, y1: oOff.y + hit.placement.y,
+            x2: oOff.x + hit.placement.x, y2: oOff.y + hit.placement.y + hit.placement.h }, layer);
+          drawTag(oOff.x + hit.placement.x - 10, oOff.y + hit.placement.y + hit.placement.h / 2, seam);
+        }
+      } else {
+        if (otherIdx < mi) {
+          this.el('line', { class: 'seam-line ' + cls,
+            x1: worldX, y1: worldY, x2: worldX + drag.w, y2: worldY }, layer);
+          drawTag(worldX + drag.w / 2, worldY - 10, seam);
+        } else {
+          this.el('line', { class: 'seam-line ' + cls,
+            x1: oOff.x + hit.placement.x, y1: oOff.y + hit.placement.y,
+            x2: oOff.x + hit.placement.x + hit.placement.w, y2: oOff.y + hit.placement.y }, layer);
+          drawTag(oOff.x + hit.placement.x + hit.placement.w / 2,
+                  oOff.y + hit.placement.y - 10, seam);
+        }
+      }
+    });
+  },
+
+  clearDragSeams() {
+    const layer = this.svg.querySelector('#drag-seam-layer');
+    if (layer) layer.remove();
   },
 
   onPointerUp() {
@@ -343,6 +523,7 @@ const Canvas = {
     const [p] = arr.splice(i, 1);
     p.x = lx; p.y = ly;
     lay.sheets[tIdx].placements.push(p);
+    this.clearDragSeams();
     App.pushHistory();
     renderAll();
   },

@@ -41,7 +41,7 @@
       <section class="panel">
         <h2>原料板</h2>
         <table class="def-table" id="sheets-table">
-          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>纹理</th><th></th></tr></thead>
+          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>纹理</th><th>周期</th><th>基点</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="add-row">
@@ -54,8 +54,11 @@
             <option value="horizontal">横向纹理</option>
             <option value="vertical">纵向纹理</option>
           </select>
+          <input id="sh-period" type="number" placeholder="纹理周期" value="0" min="0" step="1" title="纹理重复周期 mm，0=未记录">
+          <input id="sh-base" type="text" placeholder="基点 x,y" value="0,0" title="纹理定位基点（相对板材左上角）">
           <button id="btn-add-sheet">＋</button>
         </div>
+        <p class="hint">纹理周期：花纹沿纹理方向重复的间距；基点：周期线的定位起点（如 0,0）。仅设置纹理的板材参与对花。</p>
       </section>
 
       <section class="panel">
@@ -79,6 +82,17 @@
         </div>
       </section>
 
+      <section class="panel">
+        <h2>拼纹对花组 <span id="grain-count" class="badge teal"></span></h2>
+        <div class="defect-tools">
+          <button id="btn-grain-add">＋ 新建拼纹组</button>
+          <button id="btn-grain-preview">装配预览 / 换位</button>
+        </div>
+        <ul id="grain-list" class="msg-list"><li class="ok">尚无拼纹组</li></ul>
+        <p class="hint">柜门、抽屉面需要连续对花时，把零件实例按安装次序加入拼纹组；
+          排样时组员次序、同板/跨板、成品间隙、错花容差与板边/锯缝/方向/缺陷一并生效。</p>
+      </section>
+
       <section class="panel actions">
         <button id="btn-nest" class="primary">⚙ 生成排样方案</button>
         <button id="btn-renest" title="锁定区域保持不动，其余零件重新排样">🔒 保留锁定重排</button>
@@ -90,6 +104,11 @@
     <!-- 中间：方案标签 + 画布 -->
     <div id="workspace">
       <div id="layout-tabs"><span class="hint">尚未生成排样方案 — 请在左侧定义板材与零件后点击"生成排样方案"</span></div>
+      <div id="grain-toolbar">
+        <button id="btn-grain-restore" title="退回最近一次全部拼缝合格的摆位">↩ 退回最近合格摆位</button>
+        <button id="btn-adopt" title="把当前方案标记为采纳方案（随项目保存、打印图标注）">✔ 采纳本方案</button>
+        <span id="grain-toolbar-info" class="hint"></span>
+      </div>
       <div id="canvas-wrap">
         <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
         <div id="canvas-toolbar">
@@ -172,11 +191,13 @@
   <script src="/static/js/state.js"></script>
   <script src="/static/js/api.js"></script>
   <script src="/static/js/defects.js"></script>
+  <script src="/static/js/grain.js"></script>
   <script src="/static/js/validate.js"></script>
   <script src="/static/js/canvas.js"></script>
   <script src="/static/js/parttol.js"></script>
   <script src="/static/js/cutplan.js"></script>
   <script src="/static/js/cutui.js"></script>
+  <script src="/static/js/grainui.js"></script>
   <script src="/static/js/ui.js"></script>
   <script src="/static/js/print.js"></script>
   <script src="/static/js/main.js"></script>

@@ -29,13 +29,13 @@ global.renderAll = () => {};  // App.undo/redo 会调用，测试中无需真实
 global.Canvas = { svg: { querySelectorAll: () => [] }, sheetOffsets: [] };
 
 /* ---- 加载被测模块 ---- */
-const src = ['state.js', 'defects.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js', 'parttol.js']
+const src = ['state.js', 'defects.js', 'grain.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js', 'parttol.js']
   .map(f => fs.readFileSync(path.join(__dirname, '..', 'static', 'js', f), 'utf8'))
   .join('\n');
 eval(src + `
 global.App = App; global.Validate = Validate; global.Print = Print;
 global.CutPlan = CutPlan; global.CutUI = CutUI; global.Defects = Defects;
-global.PartTol = PartTol;
+global.PartTol = PartTol; global.Grain = Grain;
 global.recomputeLayoutStats = recomputeLayoutStats;
 global.guillotineCuts = guillotineCuts;
 `);
@@ -804,6 +804,155 @@ section('缺陷：随项目数据序列化与打印图标注');
     { uid: 'P1#1', partId: 'P1', name: '门板', x: 5, y: 5, w: 300, h: 200, rotated: false, locked: false }];
   const r2 = Print.sheetSvg(lay.sheets[0], 0, null);
   ok(r2.svg.includes('#1565c0'), '容许区在打印图上以蓝色虚线标出');
+}
+
+/* ================= 拼纹对花组 ================= */
+function setupGrainLayout() {
+  App.settings = { kerf: 3, margin: 5, spacing: 2 };
+  App.sheets = [{ id: 'S1', name: '纵纹板', width: 2440, height: 1220, grain: 'vertical',
+    quantity: 1, grainPeriod: 240, grainBase: { x: 0, y: 0 } }];
+  App.parts = [
+    { id: 'P1', name: '门板', width: 500, height: 350, quantity: 3, rotatable: true, grain: 'none' },
+  ];
+  App.grainGroups = [{ id: 'G1', dir: 'h', productGap: 2, tolerance: 2, sameSheet: true,
+    members: ['P1#1', 'P1#2', 'P1#3'] }];
+  App.layouts = [{
+    id: 1, strategy: '测试',
+    sheets: [{
+      sheetId: 'S1', name: '纵纹板', instance: 0, width: 2440, height: 1220,
+      grain: 'vertical', grainPeriod: 240, grainBase: { x: 0, y: 0 },
+      placements: [
+        { uid: 'P1#1', partId: 'P1', name: '门板', x: 5, y: 5, w: 500, h: 350, rotated: false, locked: false },
+        { uid: 'P1#2', partId: 'P1', name: '门板', x: 510, y: 5, w: 500, h: 350, rotated: false, locked: false },
+        { uid: 'P1#3', partId: 'P1', name: '门板', x: 1015, y: 5, w: 500, h: 350, rotated: false, locked: false },
+      ],
+    }],
+    unplaced: [], stats: {},
+  }];
+  App.active = 0;
+  App.selected = null;
+  App.resetHistory();
+}
+
+section('拼纹：接缝相位评估（与后端同口径）');
+{
+  setupGrainLayout();
+  // 纵纹横排：纹理轴沿拼缝（y vs x 链），同板同带 → 错花量 0
+  let ev = Grain.evaluate(App.layout());
+  eq(ev.totalGroups, 1, '检测到 1 个拼纹组');
+  eq(ev.completeCount, 1, '同板同带纵纹横排：组完整');
+  eq(ev.seams.length, 2, '两条接缝');
+  ok(ev.seams.every(s => s.offset === 0 && s.qualified), '两条缝错花量均为 0 且合格');
+  eq(ev.allQualified, true, '全部合格');
+
+  // 横纹板沿拼链方向：错花量 = wrap(板上净距-成品间隙, T) = wrap(5-2,240)=3
+  App.sheets[0].grain = 'horizontal';
+  App.layouts[0].sheets[0].grain = 'horizontal';
+  ev = Grain.evaluate(App.layout());
+  near(ev.maxOffset, 3, '横纹横排最大错花量为 3mm');
+  eq(ev.allQualified, false, '容差 2mm 时 3mm 超限 → 不合格');
+  ok(ev.badUids.has('P1#2'), '超限成员进入 badUids');
+
+  // 容差放宽到 3 → 合格
+  App.grainGroups[0].tolerance = 3;
+  ev = Grain.evaluate(App.layout());
+  eq(ev.allQualified, true, '容差 3mm 时合格');
+  eq(ev.completeCount, 1, '容差放宽后组完整');
+
+  // 按周期取板上净距 242（=2+240）→ wrap(242-2,240)=0
+  App.grainGroups[0].tolerance = 0;
+  const ps = App.layouts[0].sheets[0].placements;
+  ps[1].x = 5 + 500 + 242; ps[2].x = ps[1].x + 500 + 242;
+  ev = Grain.evaluate(App.layout());
+  ok(ev.seams.every(s => s.offset === 0), '周期对齐（净距=间隙+k·T）时错花量为 0');
+  eq(ev.completeCount, 1, '周期对齐且容差 0 仍完整');
+
+  // 未记录周期 → unknown，不算合格
+  App.sheets[0].grainPeriod = 0;
+  App.layouts[0].sheets[0].grainPeriod = 0;
+  App.layouts[0].sheets[0].placements.forEach((p, i) => { p.x = 5 + i * 505; });
+  ev = Grain.evaluate(App.layout());
+  eq(ev.seams[0].status, 'unknown', '缺周期接缝状态为 unknown');
+  eq(ev.completeCount, 0, 'unknown 接缝不计入完整组');
+}
+
+section('拼纹：跨板、错带、同板要求与成员缺失');
+{
+  setupGrainLayout();
+  // 跨板（两板同周期不同基点 10）：带向相位差 = wrap(5-5)=0
+  App.sheets = [
+    { id: 'S1', name: '纵纹板', width: 2440, height: 1220, grain: 'vertical', quantity: 1, grainPeriod: 240, grainBase: { x: 0, y: 0 } },
+    { id: 'S2', name: '纵纹板', width: 2440, height: 1220, grain: 'vertical', quantity: 1, grainPeriod: 240, grainBase: { x: 10, y: 0 } },
+  ];
+  App.layouts[0].sheets.push({
+    sheetId: 'S2', name: '纵纹板', instance: 0, width: 2440, height: 1220,
+    grain: 'vertical', grainPeriod: 240, grainBase: { x: 10, y: 0 }, placements: [] });
+  const s0 = App.layouts[0].sheets[0], s1 = App.layouts[0].sheets[1];
+  const p3 = s0.placements.splice(2, 1)[0];
+  p3.x = 5; s1.placements.push(p3);
+  App.grainGroups[0].sameSheet = false;
+  let ev = Grain.evaluate(App.layout());
+  const seam = ev.seams.find(s => s.to === 'P1#3');
+  eq(seam.crossSheet, true, '识别跨板接缝');
+  near(seam.offset, 0, '基点一致带向相位差为 0');
+  eq(ev.completeCount, 1, '跨板对花合格时组仍完整');
+
+  // 同板要求打开 → 违规
+  App.grainGroups[0].sameSheet = true;
+  ev = Grain.evaluate(App.layout());
+  eq(ev.groups[0].sameSheetViolation, true, '违反同板要求被标记');
+  eq(ev.completeCount, 0, '违反同板要求组不完整');
+
+  // 错带（y 偏移 8mm，容差 2）→ 超限
+  App.grainGroups[0].sameSheet = false;
+  s1.placements[0].y = 13;
+  ev = Grain.evaluate(App.layout());
+  near(ev.maxOffset, 8, '错带量计入错花量');
+  eq(ev.completeCount, 0, '错带超容差时不完整');
+
+  // 成员未放置 → partial/failed
+  s1.placements = [];
+  ev = Grain.evaluate(App.layout());
+  eq(ev.groups[0].status, 'partial', '缺一件 → partial');
+  const v = Validate.check();
+  ok(v.messages.some(m => m.msg && m.msg.includes('G1') && m.msg.includes('未放置')),
+     '校验消息列出未放置成员与组号');
+}
+
+section('拼纹：最近全部合格摆位的记录与回退');
+{
+  setupGrainLayout();
+  const lay = App.layout();
+  eq(Grain.saveCheckpoint(lay), true, '全部合格时建立基线快照');
+  eq(Grain.hasCheckpoint(lay), false, '当前状态与基线相同 → 无需回退');
+  // 移动到另一组"仍合格"摆位（纵纹带向，错花量恒 0），基线更新
+  const ps = lay.sheets[0].placements;
+  ps[1].x = 600; ps[2].x = 1200;
+  eq(Grain.saveCheckpoint(lay), true, '另一组合格摆位更新基线');
+  // 改成横纹并放到错花超限位置（净距 95，wrap(95-2,240)=93 > 2）
+  App.sheets[0].grain = 'horizontal';
+  lay.sheets[0].grain = 'horizontal';
+  ps[1].x = 600; ps[2].x = 1200;   // 保持当前位置
+  eq(Grain.saveCheckpoint(lay), false, '超限时不覆盖合格基线');
+  eq(Grain.hasCheckpoint(lay), false, '当前仍与基线几何相同 → 不可回退（基线随几何移动过）');
+  ps[1].x = 700;
+  eq(Grain.hasCheckpoint(lay), true, '几何偏离基线后可回退');
+  eq(Grain.restoreCheckpoint(lay), true, '执行回退');
+  near(lay.sheets[0].placements[1].x, 600, '回退后恢复基线位置 600');
+}
+
+section('拼纹：违规标注与实时统计');
+{
+  setupGrainLayout();
+  App.sheets[0].grain = 'horizontal';
+  App.layouts[0].sheets[0].grain = 'horizontal';
+  const v = Validate.check();
+  ok(v.vmap.get('P1#2') && v.vmap.get('P1#2').has('grainmatch'), '超限成员标 grainmatch');
+  ok(v.messages.some(m => /错花量/.test(m.msg || '')), '违规消息含错花量数值');
+  recomputeLayoutStats(App.layout());
+  eq(App.layout().stats.groupTotal, 1, '统计：拼纹组数');
+  eq(App.layout().stats.groupComplete, 0, '统计：完整组 0');
+  near(App.layout().stats.maxSeamOffset, 3, '统计：最大接缝偏差 3mm');
 }
 
 /* ================= 结果 ================= */

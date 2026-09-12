@@ -10,6 +10,15 @@
 安全外扩量。零件含 正反面要求、允许缺陷等级与容许区（零件局部坐标多边形）。
 缺陷核心区按安全外扩量膨胀（距离判定，多边形任意形状均精确）后视为禁入区，
 与板边留量、零件间距一并参与 Bottom-Left 放置计算。
+
+拼纹对花组：grainGroups 描述需要连续对花的零件实例序列（柜门/抽屉面）。
+  dir='h' 横拼（沿 x 成排，竖缝），dir='v' 纵拼（沿 y 成列，横缝）；
+  productGap 为成品安装间隙，tolerance 为可接受错花量，sameSheet 要求同一张板。
+原料板另记 grainPeriod（纹理重复周期 mm，0=未记录）与 grainBase（定位基点 {x,y}）。
+接缝错花量按相位比较：纹理轴与拼缝平行 → 比较两侧带向相位（基点差/错带）；
+纹理轴与拼链同向 → 比较前缘相位推进（锯缝/成品间隙/跨板基点，周期包裹）。
+组按原子单位排样：组员次序、同带、相位容差与板边/锯缝/方向/缺陷同时生效；
+整组失败时各成员进入未放置清单并写明触发的限制。
 """
 from __future__ import annotations
 
@@ -351,9 +360,145 @@ def expand_sheets(sheets, defects=None):
                 'w': _f(s.get('width')),
                 'h': _f(s.get('height')),
                 'grain': s.get('grain', 'none'),
+                # 纹理重复周期（0=未记录）与定位基点（板材绝对坐标）
+                'grainPeriod': max(0.0, _f(s.get('grainPeriod'), 0)),
+                'grainBase': {'x': _f((s.get('grainBase') or {}).get('x')),
+                              'y': _f((s.get('grainBase') or {}).get('y'))},
                 'defects': defects.get(f"{s.get('id')}#{i}", []),
             })
     return insts
+
+
+# ---------------------------------------------------------------------------
+# 拼纹对花组
+# ---------------------------------------------------------------------------
+def normalize_groups(groups):
+    """规范化拼纹组：去重成员 uid，丢弃空组。
+
+    返回 [{id, dir:'h'|'v', productGap, tolerance, sameSheet, members:[uid...]}]。
+    """
+    out = []
+    for g in groups or []:
+        seen = set()
+        members = []
+        for uid in g.get('members') or []:
+            uid = str(uid)
+            if uid and uid not in seen:
+                seen.add(uid)
+                members.append(uid)
+        if not members:
+            continue
+        out.append({
+            'id': g.get('id') or f"G{len(out) + 1}",
+            'dir': g.get('dir') if g.get('dir') in ('h', 'v') else 'h',
+            'productGap': max(0.0, _f(g.get('productGap'), 0)),
+            'tolerance': max(0.0, _f(g.get('tolerance'), 0)),
+            'sameSheet': bool(g.get('sameSheet', False)),
+            'members': members,
+        })
+    return out
+
+
+def group_member_map(groups):
+    """uid → 所属拼纹组（一个实例最多属于一个组）。"""
+    m = {}
+    for g in groups:
+        for uid in g['members']:
+            m[uid] = g['id']
+    return m
+
+
+def _phase_wrap(v, period):
+    """把相位差包裹到 [-T/2, T/2]，返回绝对值（错花量 mm）。"""
+    if period <= EPS:
+        return abs(v)
+    r = v - period * round(v / period)
+    return abs(r)
+
+
+def evaluate_seam(prev, cur, axis, product_gap, s_prev, s_cur, gap_sheet=None):
+    """计算一条拼缝的错花量与状态。
+
+    prev/cur：相邻两成员放置记录（绝对坐标，含 'x','y','w','h'）。
+    axis：拼链方向 'x'（横拼成排，缝为竖缝）或 'y'（纵拼成列，缝为横缝）。
+    product_gap：成品安装间隙 mm（理想对花时两件在成品上的净距）。
+    s_prev/s_cur：两件所在板材实例（含 grain/grainPeriod/grainBase）；同一对象=同一张板。
+    gap_sheet：板上两件实际净距（None 时由坐标直接计算）。
+    返回 {'offset','status':'ok'|'unknown','band','reason'}；
+    'unknown' 表示缺周期/跨板周期不一致，无法核算错花量（按不合格处理）。
+
+    物理模型：同一张板上两件纹理相位差就是板上间距（相对各自基点测量）；
+    成品连续对花要求 B 件起点相位 = A 件终点相位 + 成品间隙（模周期）。
+      纵纹（纹理轴与拼链同向）：offset = wrap((前缘-base_B) - (A终点-base_A) - 成品间隙)
+      横纹（纹理轴沿拼缝）：同带时比较带向基点相位；错带量直接计入错花量。
+    """
+    if gap_sheet is None:
+        if axis == 'x':
+            gap_sheet = cur['x'] - (prev['x'] + prev['w'])
+        else:
+            gap_sheet = cur['y'] - (prev['y'] + prev['h'])
+    Tp = max(0.0, s_prev.get('grainPeriod', 0) or 0)
+    Tc = max(0.0, s_cur.get('grainPeriod', 0) or 0)
+    bp = s_prev.get('grainBase') or {'x': 0.0, 'y': 0.0}
+    bc = s_cur.get('grainBase') or {'x': 0.0, 'y': 0.0}
+    same_board = s_prev is s_cur
+    grain = s_prev.get('grain') or 'none'
+    grain_axis = axis if grain == 'none' else ('x' if grain == 'horizontal' else 'y')
+
+    def unk(msg):
+        return {'offset': 0.0, 'status': 'unknown', 'band': False, 'reason': msg}
+
+    # 无纹理板材（双方都无纹理方向且未记周期）：没有花纹可对，接缝免核
+    if (s_prev.get('grain') or 'none') == 'none' and \
+       (s_cur.get('grain') or 'none') == 'none' and Tp <= EPS and Tc <= EPS:
+        return {'offset': 0.0, 'status': 'ok', 'band': False, 'reason': ''}
+
+    if grain_axis == axis:
+        # 纹理轴与拼链同向
+        if axis == 'x':
+            front, edge = cur['x'], prev['x'] + prev['w']
+            ba, bb = bp['x'], bc['x']
+        else:
+            front, edge = cur['y'], prev['y'] + prev['h']
+            ba, bb = bp['y'], bc['y']
+        if same_board:
+            if Tp <= EPS:
+                return unk('原料板未记录纹理重复周期，无法核算沿纹理方向的错花量')
+            off = _phase_wrap(gap_sheet - product_gap, Tp)
+            return {'offset': off, 'status': 'ok', 'band': False, 'reason': ''}
+        if Tp <= EPS or Tc <= EPS:
+            return unk('原料板未记录纹理重复周期，跨板接缝相位无法核算')
+        if abs(Tp - Tc) > EPS:
+            return unk('两张原料板纹理周期不一致，接缝相位无法对齐')
+        off = _phase_wrap((front - bb) - (edge - ba) - product_gap, Tp)
+        return {'offset': off, 'status': 'ok', 'band': False, 'reason': ''}
+
+    # 纹理轴与拼链垂直（沿拼缝方向）：同带 + 两侧带向相位
+    cross = 'y' if axis == 'x' else 'x'
+    if cross == 'y':
+        pa, pb = prev['y'] - bp['y'], cur['y'] - bc['y']
+        band = abs(cur['y'] - prev['y'])
+    else:
+        pa, pb = prev['x'] - bp['x'], cur['x'] - bc['x']
+        band = abs(cur['x'] - prev['x'])
+    if band > EPS:
+        return {'offset': band, 'status': 'ok', 'band': True,
+                'reason': '成员未处于同一条带（错带）'}
+    if same_board:
+        return {'offset': 0.0, 'status': 'ok', 'band': False, 'reason': ''}
+    if Tp <= EPS or Tc <= EPS:
+        return unk('原料板未记录纹理重复周期，跨板带向相位无法核算')
+    if abs(Tp - Tc) > EPS:
+        return unk('两张原料板纹理周期不一致，带向相位无法对齐')
+    return {'offset': _phase_wrap(pb - pa, Tp), 'status': 'ok',
+            'band': False, 'reason': ''}
+
+
+def seam_qualified(seam, tolerance):
+    """依据容差判定接缝：unknown 不算合格，错花量 ≤ 容差才合格。"""
+    if seam['status'] == 'unknown':
+        return False
+    return seam['offset'] <= tolerance + EPS
 
 
 def orientations(inst, sheet_grain='none'):
@@ -576,13 +721,439 @@ def _unplaced_reason(inst, states, settings):
     return {'text': '板材剩余空间不足，无法容纳', 'conflicts': []}
 
 
-def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
-    """执行一次排样。locked: {板材实例序号字符串: [已锁定放置]}，这些放置保持不动。"""
+def _group_geom(inst, st):
+    """成员在候选板上的摆放 (w,h,rot)；与纹理/旋转约束不兼容或超限返回 None。"""
+    oris = orientations(inst, st['def'].get('grain', 'none'))
+    if not oris:
+        return None
+    w, h, rot = oris[0]   # 优先不旋转（horizontal 本就不旋转，vertical 本就旋转）
+    if w > st['uw'] + EPS or h > st['uh'] + EPS:
+        return None
+    return w, h, rot
+
+
+def _grain_axis(st, chain):
+    """板材纹理轴：horizontal→x，vertical→y，无纹理→沿拼链方向。"""
+    g = st['def'].get('grain') or 'none'
+    if g == 'horizontal':
+        return 'x'
+    if g == 'vertical':
+        return 'y'
+    return chain
+
+
+def _rect_ok(st, x, y, w, h, inst, gap, extra):
+    """候选矩形在该板可用区是否可行：边界 + 间距/重叠 + 缺陷。"""
+    if x < -EPS or y < -EPS or x + w > st['uw'] + EPS or y + h > st['uh'] + EPS:
+        return False
+    if _conflicts(x, y, w, h, st['placed'] + extra, gap):
+        return False
+    if _blocking_defect(x, y, w, h, inst, st['defects']):
+        return False
+    return True
+
+
+def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin):
+    """沿拼链生成候选链坐标（可用区域坐标），兼顾贴边/绕障与对花周期。
+
+    返回去重升序的候选列表。相位合格的理想间距为 pgap + k·T（同板，
+    错花量 = wrap(板上净距-成品间隙)）；另加入障碍右缘+gap 用于绕障。
+    """
+    if prev is None:
+        cands = {0.0}
+        for r in st['placed'] + extra:
+            edge = (r['x'] + r['w']) if chain == 'x' else (r['y'] + r['h'])
+            cands.add(max(0.0, edge + gap))
+        return sorted(cands)
+    edge = (prev['x'] + prev['w']) if chain == 'x' else (prev['y'] + prev['h'])
+    cands = set()
+    # 对花理想位置：净距 = pgap + k·T（k=0,1,2,…）
+    if period and period > EPS:
+        k = 0
+        while edge + pgap + k * period <= st['uw' if chain == 'x' else 'uh'] + EPS and k < 200:
+            c = edge + pgap + k * period
+            if c >= start - EPS:
+                cands.add(c)
+            k += 1
+    # 无周期（横纹横排等相位沿拼缝的情形）或绕障：最小净距
+    cands.add(max(edge + gap, start))
+    for r in st['placed'] + extra:
+        e2 = (r['x'] + r['w']) if chain == 'x' else (r['y'] + r['h'])
+        c = e2 + gap
+        if c >= edge + gap - EPS:
+            cands.add(c)
+    return sorted(c for c in cands if c >= edge + gap - EPS)
+
+
+def _band_coords(chain, st, extra, gap, prev, first_band):
+    """候选带坐标（与拼链垂直方向）：承接上一成员的带，或新带贴边/绕障。"""
+    if prev is not None:
+        band = prev['y'] if chain == 'x' else prev['x']
+        cands = {band}
+        # 该带被占时枚举带起点
+        for r in st['placed'] + extra:
+            e2 = (r['y'] + r['h']) if chain == 'x' else (r['x'] + r['w'])
+            cands.add(max(0.0, e2 + gap))
+        return sorted(cands)
+    if first_band is not None:
+        return [first_band]
+    cands = {0.0}
+    for r in st['placed'] + extra:
+        e2 = (r['y'] + r['h']) if chain == 'x' else (r['x'] + r['w'])
+        cands.add(max(0.0, e2 + gap))
+    return sorted(cands)
+
+
+def _seam_for_records(prev, cur, chain, group, st_prev, st_cur, margin, product_gap=None):
+    """由两条放置记录（可用区域坐标）构造绝对坐标记录并评估接缝。"""
+    if product_gap is None:
+        product_gap = group['productGap']
+    p_abs = {'x': prev['x'] + margin, 'y': prev['y'] + margin, 'w': prev['w'], 'h': prev['h']}
+    c_abs = {'x': cur['x'] + margin, 'y': cur['y'] + margin, 'w': cur['w'], 'h': cur['h']}
+    return evaluate_seam(p_abs, c_abs, chain, product_gap,
+                         st_prev['def'], st_cur['def'])
+
+
+def place_group(group, insts_by_uid, states, gap, margin):
+    """把一个拼纹组按原子单位放置。
+
+    成功：{'ok':True,'records':[{uid,inst,state,x,y,w,h,rot}]}
+    失败：{'ok':False,'blockers':{uid:[原因...]},'why':code}
+    约束同时生效：成员次序（沿拼链）、同带、板边留量、锯缝/间距、纹理方向、
+    缺陷避让、接缝错花量 ≤ tolerance、sameSheet 同板要求。
+    """
+    chain = 'x' if group['dir'] == 'h' else 'y'
+    tol, pgap = group['tolerance'], group['productGap']
+
+    members, blockers = [], {}
+    for uid in group['members']:
+        inst = insts_by_uid.get(uid)
+        if inst is None:
+            blockers.setdefault(uid, []).append('零件实例不存在（定义或数量已变更）')
+        else:
+            members.append(inst)
+    if blockers:
+        return {'ok': False, 'blockers': blockers, 'why': 'missing'}
+
+    compatible = [st for st in states
+                  if st['uw'] > EPS and st['uh'] > EPS
+                  and all(_group_geom(inst, st) for inst in members)]
+    if not compatible:
+        for inst in members:
+            reasons = []
+            if not orientations(inst):
+                reasons.append('纹理方向与不可旋转设置冲突')
+            else:
+                fit_any = any(
+                    any(w <= st['uw'] + EPS and h <= st['uh'] + EPS
+                        for w, h, _ in orientations(inst, st['def'].get('grain', 'none')))
+                    for st in states)
+                if fit_any:
+                    reasons.append('纹理方向与所有原料板冲突')
+                else:
+                    reasons.append('尺寸超出所有原料板可用区域')
+            blockers[inst['uid']] = reasons
+        return {'ok': False, 'blockers': blockers, 'why': 'compat'}
+
+    # 带向等尺寸检查（横拼等高，纵拼等宽）；不一致直接失败
+    for st in compatible[:1]:
+        geoms = [_group_geom(i, st) for i in members]
+        cross_sizes = [(g[1] if chain == 'x' else g[0]) for g in geoms]
+        if max(cross_sizes) - min(cross_sizes) > EPS:
+            why = '成员' + ('高度' if chain == 'x' else '宽度') + '不一致，无法同带拼合'
+            for inst in members:
+                blockers[inst['uid']] = [why]
+            return {'ok': False, 'blockers': blockers, 'why': 'band'}
+
+    def try_single_board(st):
+        """整组落同一张板。返回 records 或 None。"""
+        geoms = [_group_geom(i, st) for i in members]
+        gax = _grain_axis(st, chain)
+        T = st['def'].get('grainPeriod', 0) or 0
+        longitudinal = (gax == chain)
+        if longitudinal and T <= EPS and (st['def'].get('grain') or 'none') != 'none':
+            return None  # 有纹理却未记周期：沿纹理方向无法保证对花
+        cross_size = max((g[1] if chain == 'x' else g[0]) for g in geoms)
+        pitch_gap = max(gap, pgap)
+        chain_len = sum((g[0] if chain == 'x' else g[1]) for g in geoms) \
+            + (len(members) - 1) * pitch_gap
+        U = st['uw'] if chain == 'x' else st['uh']
+        V = st['uh'] if chain == 'x' else st['uw']
+        if chain_len > U + EPS or cross_size > V + EPS:
+            return None
+
+        # 枚举首成员带坐标（贴 0 / 已有零件外缘 +gap）
+        first_bands = _band_coords(chain, st, [], gap, None, None)
+        for fb in first_bands:
+            recs, extra = [], []
+            ok = True
+            for k, (inst, (w, h, rot)) in enumerate(zip(members, geoms)):
+                prev = recs[-1] if recs else None
+                period = T if longitudinal else 0
+                cc = _chain_cands(chain, st, extra, 0.0, gap, pgap, prev, period, tol, margin)
+                bc = [fb] if prev is None else _band_coords(chain, st, extra, gap, prev, fb)
+                found = None
+                for c in cc:
+                    for b in bc:
+                        x, y = (c, b) if chain == 'x' else (b, c)
+                        ww, hh = (w, h)
+                        if not _rect_ok(st, x, y, ww, hh, inst, gap, extra):
+                            continue
+                        if prev is not None:
+                            seam = _seam_for_records(prev, {'x': x, 'y': y, 'w': w, 'h': h},
+                                                     chain, group, prev['state'], st, margin)
+                            if not seam_qualified(seam, tol):
+                                continue
+                        found = (x, y)
+                        break
+                    if found:
+                        break
+                if found is None:
+                    ok = False
+                    break
+                x, y = found
+                rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
+                       'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
+                recs.append(rec)
+                extra.append(rec)
+            if ok and len(recs) == len(members):
+                return recs
+        return None
+
+    # 优先同板 first-fit（无论是否要求同板，同板对花质量最好）
+    for st in compatible:
+        recs = try_single_board(st)
+        if recs is not None:
+            return {'ok': True, 'records': recs}
+
+    if group['sameSheet']:
+        why_text = _group_fail_reason(group, members, compatible, gap, margin)
+        for inst in members:
+            blockers[inst['uid']] = [why_text, '拼纹组要求全部取自同一张板']
+        return {'ok': False, 'blockers': blockers, 'why': 'sameSheet'}
+
+    # 允许跨板：沿链逐件 first-fit。两轮策略——先追求接缝全部合格，
+    # 再退而求其次尽量放全（无法对齐的接缝标 unknown，由分析阶段报告）。
+    def attempt_split(allow_unknown):
+        recs, extras = [], {}
+        for inst in members:
+            prev = recs[-1] if recs else None
+            fallback_pos = None
+            placed_here = False
+            for st in compatible:
+                geom = _group_geom(inst, st)
+                if geom is None:
+                    continue
+                w, h, rot = geom
+                gax = _grain_axis(st, chain)
+                T = st['def'].get('grainPeriod', 0) or 0
+                longitudinal = (gax == chain)
+                if prev is not None and longitudinal and T <= EPS and \
+                        (st['def'].get('grain') or 'none') != 'none':
+                    if not allow_unknown:
+                        continue
+                extra = extras.get(id(st), [])
+                if prev is not None and prev['state'] is st:
+                    start = ((prev['x'] + prev['w']) if chain == 'x'
+                             else (prev['y'] + prev['h'])) + gap
+                else:
+                    start = 0.0
+                period = T if (prev is not None and longitudinal) else 0
+                cc = _chain_cands(chain, st, extra, start, gap, pgap,
+                                  prev if prev is not None and prev['state'] is st else None,
+                                  period, tol, margin)
+                bc = _band_coords(chain, st, extra, gap,
+                                  prev if prev is not None and prev['state'] is st else None,
+                                  prev['y' if chain == 'x' else 'x'] if prev is not None else None)
+                first_pos = None
+                for c in cc:
+                    for b in bc:
+                        x, y = (c, b) if chain == 'x' else (b, c)
+                        if not _rect_ok(st, x, y, w, h, inst, gap, extra):
+                            continue
+                        if first_pos is None:
+                            first_pos = (st, x, y, w, h, rot)
+                        if prev is not None:
+                            seam = _seam_for_records(prev, {'x': x, 'y': y, 'w': w, 'h': h},
+                                                     chain, group, prev['state'], st, margin)
+                            if not seam_qualified(seam, tol):
+                                if not (allow_unknown and seam['status'] == 'unknown'):
+                                    continue
+                        rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
+                               'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
+                        recs.append(rec)
+                        extras.setdefault(id(st), []).append(rec)
+                        placed_here = True
+                        break
+                    if placed_here:
+                        break
+                if placed_here:
+                    break
+                if first_pos is not None and fallback_pos is None and allow_unknown:
+                    # 纵向缺周期等 unknown 情形：记住首个几何可行位置兜底
+                    if prev is None or (longitudinal and T <= EPS):
+                        fallback_pos = first_pos
+            if not placed_here and fallback_pos is not None:
+                st, x, y, w, h, rot = fallback_pos
+                rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
+                       'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
+                recs.append(rec)
+                extras.setdefault(id(st), []).append(rec)
+                placed_here = True
+            if not placed_here:
+                return recs
+        return recs
+
+    recs = attempt_split(allow_unknown=False)
+    if len(recs) != len(members):
+        recs = attempt_split(allow_unknown=True)
+
+    if len(recs) == len(members):
+        return {'ok': True, 'records': recs}
+
+    phase_failed = len(recs) > 0
+    # 原子失败：汇总各成员受阻原因（已放/未放均列入未放置清单）
+    for k, inst in enumerate(members):
+        reasons = []
+        if k == len(recs):
+            reasons.append('接缝错花量超过可接受值 %gmm（相位/周期限制）' % tol
+                           if phase_failed else
+                           '板材剩余空间、锯缝间距或缺陷避让限制下无法继续放置')
+        else:
+            reasons.append('整组原子排样失败：组内有成员无法落板')
+            if phase_failed:
+                reasons.append('相位（错花量）限制无法满足')
+        blockers[inst['uid']] = reasons
+    return {'ok': False, 'blockers': blockers,
+            'why': 'phase' if phase_failed else 'space'}
+
+
+def _group_fail_reason(group, members, compatible, gap, margin):
+    """同板失败时给出最贴切的限制说明。"""
+    chain = 'x' if group['dir'] == 'h' else 'y'
+    st = compatible[0]
+    geoms = [_group_geom(i, st) for i in members]
+    cross_size = max((g[1] if chain == 'x' else g[0]) for g in geoms)
+    chain_len = sum((g[0] if chain == 'x' else g[1]) for g in geoms) \
+        + (len(members) - 1) * max(gap, group['productGap'])
+    U = st['uw'] if chain == 'x' else st['uh']
+    V = st['uh'] if chain == 'x' else st['uw']
+    gax = _grain_axis(st, chain)
+    T = st['def'].get('grainPeriod', 0) or 0
+    if chain_len > U + EPS or cross_size > V + EPS:
+        return ('整组外形 %g×%g 超出板材可用区域 %g×%g'
+                % (chain_len, cross_size, U, V))
+    if gax == chain and T <= EPS and (st['def'].get('grain') or 'none') != 'none':
+        return '原料板未记录纹理重复周期，无法保证沿纹理方向的错花量 ≤ %gmm' % group['tolerance']
+    return ('整组无法在同一张板上同时满足同带次序、锯缝/间距与错花量 ≤ %gmm（含缺陷避让）'
+            % group['tolerance'])
+
+
+def _commit_group_records(records, group_id):
+    """把拼纹组放置记录写入各板 placed（可用区域坐标）。"""
+    for mi, r in enumerate(records):
+        r['state']['placed'].append({
+            'uid': r['uid'], 'partId': r['inst']['partId'], 'name': r['inst']['name'],
+            'x': r['x'], 'y': r['y'], 'w': r['w'], 'h': r['h'],
+            'rotated': r['rot'], 'locked': False,
+            'groupId': group_id, 'memberIndex': mi,
+        })
+
+
+def _analyze_groups(layout_states, groups, group_ids_by_uid, margin):
+    """对排样结果逐组逐缝评估（绝对坐标）。
+
+    layout_states: pack 的 states（含 placed，可用区域坐标）。
+    返回 (groups_out, placed_uid_sheet, group_status_by_id)。
+    """
+    # uid → (state_idx, placement 可用坐标)
+    where = {}
+    for si, st in enumerate(layout_states):
+        for r in st['placed']:
+            where[r['uid']] = (si, st, r)
+
+    groups_out = []
+    status_by_id = {}
+    for g in groups:
+        members_out = []
+        seams_out = []
+        prev_r = prev_st = None
+        prev_uid = None
+        placed_cnt = 0
+        max_off = 0.0
+        bad_seams, unknown_seams = 0, 0
+        for mi, uid in enumerate(g['members']):
+            hit = where.get(uid)
+            if hit:
+                si, st, r = hit
+                placed_cnt += 1
+                members_out.append({'uid': uid, 'sheetIndex': si,
+                                    'sheetId': st['def']['sheetId'],
+                                    'instance': st['def']['instance'],
+                                    'memberIndex': mi})
+                if prev_r is not None:
+                    p_abs = {'x': prev_r['x'] + margin, 'y': prev_r['y'] + margin,
+                             'w': prev_r['w'], 'h': prev_r['h']}
+                    c_abs = {'x': r['x'] + margin, 'y': r['y'] + margin,
+                             'w': r['w'], 'h': r['h']}
+                    axis = 'x' if g['dir'] == 'h' else 'y'
+                    seam = evaluate_seam(p_abs, c_abs, axis, g['productGap'],
+                                         prev_st['def'], st['def'])
+                    qualified = seam_qualified(seam, g['tolerance'])
+                    if seam['status'] == 'unknown':
+                        unknown_seams += 1
+                    if not qualified:
+                        bad_seams += 1
+                    max_off = max(max_off, seam['offset'] if seam['status'] != 'unknown' else 0.0)
+                    seams_out.append({
+                        'from': prev_uid, 'to': uid,
+                        'fromSheet': layout_states.index(prev_st),
+                        'toSheet': si,
+                        'offset': round(seam['offset'], 2),
+                        'status': seam['status'],
+                        'qualified': qualified,
+                        'band': seam['band'],
+                        'reason': seam['reason'],
+                        'tolerance': g['tolerance'],
+                    })
+                prev_r, prev_st, prev_uid = r, st, uid
+            else:
+                members_out.append({'uid': uid, 'sheetIndex': None,
+                                    'sheetId': None, 'instance': None,
+                                    'memberIndex': mi})
+                prev_r, prev_st, prev_uid = None, None, uid
+        if placed_cnt == len(g['members']) and bad_seams == 0 and unknown_seams == 0:
+            status = 'complete'
+        elif placed_cnt == 0:
+            status = 'failed'
+        else:
+            status = 'partial'
+        status_by_id[g['id']] = status
+        groups_out.append({
+            'id': g['id'], 'dir': g['dir'],
+            'productGap': g['productGap'], 'tolerance': g['tolerance'],
+            'sameSheet': g['sameSheet'],
+            'members': members_out, 'seams': seams_out,
+            'status': status,
+            'placedCount': placed_cnt, 'memberCount': len(g['members']),
+            'maxOffset': round(max_off, 2),
+            'badSeamCount': bad_seams, 'unknownSeamCount': unknown_seams,
+        })
+    return groups_out, where, status_by_id
+
+
+def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=None):
+    """执行一次排样。locked: {板材实例序号字符串: [已锁定放置]}，这些放置保持不动。
+
+    groups: 拼纹对花组（normalize_groups 后的列表）。组按原子单位优先于散件排样；
+    组员次序、同带与纹理相位容差同板边/锯缝/方向/缺陷限制一并生效。
+    """
     kerf = _f(settings.get('kerf'), 3)
     margin = _f(settings.get('margin'), 0)
     spacing = _f(settings.get('spacing'), 0)
     gap = kerf + spacing
     locked = locked or {}
+    groups = groups or []
 
     locked_uids = set()
     states = []
@@ -606,7 +1177,30 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
                        'uh': s['h'] - 2 * margin, 'placed': placed,
                        'defects': udefects})
 
-    pool = [p for p in part_insts if p['uid'] not in locked_uids]
+    insts_by_uid = {p['uid']: p for p in part_insts}
+    group_ids_by_uid = group_member_map(groups)
+    grouped_uids = set()
+    for g in groups:
+        grouped_uids.update(g['members'])
+
+    # 1) 拼纹组原子排样（按成员总面积降序，大组优先）
+    group_failures = {}   # uid → [原因]
+    failed_group_ids = set()
+    ordered_groups = sorted(
+        groups,
+        key=lambda g: -sum((insts_by_uid[u]['w'] * insts_by_uid[u]['h'])
+                           for u in g['members'] if u in insts_by_uid))
+    for g in ordered_groups:
+        res = place_group(g, insts_by_uid, states, gap, margin)
+        if res['ok']:
+            _commit_group_records(res['records'], g['id'])
+        else:
+            failed_group_ids.add(g['id'])
+            group_failures.update(res.get('blockers', {}))
+
+    # 2) 散件 Bottom-Left first-fit（组成员失败则不再作为散件补位，整组保持未放置）
+    pool = [p for p in part_insts
+            if p['uid'] not in locked_uids and p['uid'] not in grouped_uids]
     pool.sort(key=sort_key or (lambda p: p['w'] * p['h']), reverse=True)
 
     unplaced = []
@@ -628,6 +1222,14 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
         if not done:
             unplaced.append(inst)
 
+    # 拼纹组成员未放置：place_group 仅在整组成功时落板，失败组成员全部列入未放置
+    for g in ordered_groups:
+        if g['id'] in failed_group_ids:
+            for uid in g['members']:
+                inst = insts_by_uid.get(uid)
+                if inst is not None:
+                    unplaced.append(inst)
+
     # 合格性：已放置（含锁定）零件不得与任何缺陷冲突（锁定件可能压在缺陷上）
     def defects_abs(st):
         return st['def'].get('defects', [])
@@ -636,7 +1238,7 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
     qualified = 0
     for si, st in enumerate(states):
         for r in st['placed']:
-            inst = next((p for p in part_insts if p['uid'] == r['uid']), None)
+            inst = insts_by_uid.get(r['uid'])
             if inst is None:
                 continue
             hit = _blocking_defect(r['x'], r['y'], r['w'], r['h'], inst,
@@ -652,6 +1254,11 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
             else:
                 qualified += 1
 
+    # 拼纹组接缝评估
+    groups_out, _, status_by_id = _analyze_groups(states, groups, group_ids_by_uid, margin)
+    complete_groups = sum(1 for go in groups_out if go['status'] == 'complete')
+    max_seam_offset = max((go['maxOffset'] for go in groups_out), default=0.0)
+
     out_sheets = []
     for st in states:
         placements = [{
@@ -659,6 +1266,8 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
             'x': round(r['x'] + margin, 3), 'y': round(r['y'] + margin, 3),
             'w': r['w'], 'h': r['h'], 'rotated': r['rotated'],
             'locked': r.get('locked', False),
+            'groupId': r.get('groupId'),
+            'memberIndex': r.get('memberIndex'),
         } for r in st['placed']]
         # 每张已用板材自身的避让碎料（未使用板不计入方案比较）
         sheet_scrap = sum(expanded_defect_area(d, margin, st['uw'], st['uh'])
@@ -667,6 +1276,9 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
             'sheetId': st['def']['sheetId'], 'name': st['def']['name'],
             'instance': st['def']['instance'],
             'width': st['def']['w'], 'height': st['def']['h'],
+            'grain': st['def'].get('grain', 'none'),
+            'grainPeriod': st['def'].get('grainPeriod', 0),
+            'grainBase': st['def'].get('grainBase', {'x': 0, 'y': 0}),
             'placements': placements,
             'defectScrap': round(sheet_scrap, 1),
         })
@@ -690,16 +1302,29 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
         'qualifiedCount': qualified,
         'defectConflictCount': len(conflict_rows),
         'defectScrap': defect_scrap,
+        'groupTotal': len(groups),
+        'groupComplete': complete_groups,
+        'maxSeamOffset': round(max_seam_offset, 2),
     }
     unplaced_out = []
     for p in unplaced:
+        if p['uid'] in group_failures:
+            reasons = list(dict.fromkeys(group_failures[p['uid']]))
+            unplaced_out.append({
+                'uid': p['uid'], 'partId': p['partId'], 'name': p['name'],
+                'reason': '；'.join(reasons), 'conflicts': [],
+                'groupId': group_ids_by_uid.get(p['uid']),
+                'groupBlocked': True,
+            })
+            continue
         reason = _unplaced_reason(p, states, settings)
         unplaced_out.append({
             'uid': p['uid'], 'partId': p['partId'], 'name': p['name'],
             'reason': reason['text'], 'conflicts': reason['conflicts'],
         })
     return {'sheets': out_sheets, 'unplaced': unplaced_out,
-            'conflicts': conflict_rows, 'stats': stats}
+            'conflicts': conflict_rows, 'stats': stats,
+            'grainGroups': groups_out}
 
 
 def _signature(res):
@@ -738,21 +1363,28 @@ def generate_layouts(payload, max_layouts=3):
     locked = {k: [lp for lp in v if lp.get('uid') in valid_uids]
               for k, v in (payload.get('locked') or {}).items()}
 
+    # 拼纹对花组：过滤掉实例已不存在的成员引用
+    groups = normalize_groups(payload.get('grainGroups'))
+    groups = [g for g in groups if all(u in valid_uids for u in g['members'])]
+
     results, seen = [], set()
     for label, key in STRATEGIES:
-        res = pack(part_insts, sheet_insts, settings, locked, key)
+        res = pack(part_insts, sheet_insts, settings, locked, key, groups)
         sig = _signature(res)
         if sig in seen:
             continue
         seen.add(sig)
         results.append((label, res))
 
-    # 排序：未放置少者优先 → 合格零件多者优先 → 使用板材少者优先
-    #       → 利用率高者优先 → 避让碎料少者优先 → 切割次数少者优先
-    results.sort(key=lambda item: (len(item[1]['unplaced']),
-                                   -item[1]['stats']['qualifiedCount'],
+    # 排序优先级：完整落板的拼纹组多者优先 → 最大接缝偏差小者优先
+    #   → 耗用板数少者优先 → 利用率高者优先
+    #   → 未放置少者 → 合格零件多者 → 避让碎料少者 → 切割次数少者
+    results.sort(key=lambda item: (-item[1]['stats']['groupComplete'],
+                                   item[1]['stats']['maxSeamOffset'],
                                    item[1]['stats']['usedSheets'],
                                    -item[1]['stats']['utilization'],
+                                   len(item[1]['unplaced']),
+                                   -item[1]['stats']['qualifiedCount'],
                                    item[1]['stats']['defectScrap'],
                                    item[1]['stats']['cuts']))
     max_layouts = max(1, min(int(_f(max_layouts, 3)), 5))

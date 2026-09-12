@@ -4,11 +4,13 @@ const Main = {
   init() {
     Canvas.init();
     CutUI.init();
+    GrainUI.init();
     this.bindTopbar();
     this.bindSettings();
     this.bindDefForms();
     this.bindDefectTools();
     this.bindActions();
+    this.bindGrainActions();
     this.bindKeyboard();
     this.loadSample();
     UI.renderSheetsTable();
@@ -21,14 +23,23 @@ const Main = {
   loadSample() {
     App.settings = { kerf: 3, margin: 5, spacing: 2 };
     App.sheets = [
-      { id: 'S1', name: '多层板', width: 2440, height: 1220, grain: 'horizontal', quantity: 2 },
+      { id: 'S1', name: '多层板', width: 2440, height: 1220, grain: 'vertical', quantity: 2,
+        grainPeriod: 240, grainBase: { x: 0, y: 0 } },
     ];
     App.parts = [
       { id: 'P1', name: '侧板', width: 600, height: 400, quantity: 4, rotatable: true, grain: 'none', faceReq: 'front', allowGrade: 1, allowZones: [] },
       { id: 'P2', name: '层板', width: 560, height: 300, quantity: 6, rotatable: true, grain: 'none', faceReq: 'any', allowGrade: 2, allowZones: [] },
-      { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: false, grain: 'horizontal', faceReq: 'both', allowGrade: 0, allowZones: [] },
+      { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
       { id: 'P4', name: '背板', width: 580, height: 380, quantity: 2, rotatable: true, grain: 'none', faceReq: 'back', allowGrade: 0,
         allowZones: [{ points: [{ x: 0, y: 300 }, { x: 200, y: 300 }, { x: 200, y: 380 }, { x: 0, y: 380 }] }] },
+      { id: 'P5', name: '抽屉面', width: 460, height: 200, quantity: 3, rotatable: false, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
+    ];
+    // 拼纹对花组：柜门 4 连拼、抽屉面 3 连拼（安装次序即成员次序）
+    App.grainGroups = [
+      { id: 'G1', dir: 'h', productGap: 2, tolerance: 2, sameSheet: true,
+        members: ['P3#1', 'P3#2', 'P3#3', 'P3#4'] },
+      { id: 'G2', dir: 'h', productGap: 2, tolerance: 3, sameSheet: false,
+        members: ['P5#1', 'P5#2', 'P5#3'] },
     ];
     App.defects = {};
     App.layouts = [];
@@ -54,9 +65,11 @@ const Main = {
     document.getElementById('btn-cutplan').addEventListener('click', () => CutUI.toggle());
     document.getElementById('btn-new').addEventListener('click', () => {
       if (!confirm('新建项目将清空当前数据，确定？')) return;
-      App.sheets = [{ id: 'S1', name: '原料板', width: 2440, height: 1220, grain: 'none', quantity: 1 }];
+      App.sheets = [{ id: 'S1', name: '原料板', width: 2440, height: 1220, grain: 'none',
+        quantity: 1, grainPeriod: 0, grainBase: { x: 0, y: 0 } }];
       App.parts = [];
       App.defects = {};
+      App.grainGroups = [];
       App.layouts = [];
       App.active = 0;
       App.selected = null;
@@ -104,6 +117,8 @@ const Main = {
         width: w, height: h,
         quantity: Math.max(1, +g('sh-qty') || 1),
         grain: g('sh-grain'),
+        grainPeriod: Math.max(0, +g('sh-period') || 0),
+        grainBase: this.parseBase(g('sh-base')),
       });
       UI.renderSheetsTable();
       this.onStructureChanged(false);
@@ -127,7 +142,14 @@ const Main = {
   },
 
   /* 结构性修改（尺寸/数量/增删）后，旧排样结果失效 */
+  parseBase(txt) {
+    const m = /^\s*(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)\s*$/.exec(txt || '');
+    return m ? { x: +m[1], y: +m[2] } : { x: 0, y: 0 };
+  },
+
   onStructureChanged(notify = true) {
+    // 清理拼纹组中已不存在的实例引用
+    if (typeof App.cleanGroups === 'function') App.cleanGroups(new Set(App.allInstanceUids()));
     if (App.layouts.length) {
       App.layouts = [];
       App.active = 0;
@@ -161,6 +183,27 @@ const Main = {
   bindDefectTools() {
     document.getElementById('btn-d-rect').addEventListener('click', () => Defects.setMode('rect'));
     document.getElementById('btn-d-poly').addEventListener('click', () => Defects.setMode('poly'));
+  },
+
+  /* ---- 拼纹操作：采纳方案 / 退回最近合格摆位 ---- */
+  bindGrainActions() {
+    document.getElementById('btn-grain-restore').addEventListener('click', () => {
+      const lay = App.layout();
+      if (!lay) return;
+      if (!Grain.hasCheckpoint(lay)) { toast('还没有"全部合格"的摆位记录'); return; }
+      Grain.restoreCheckpoint(lay);
+      App.pushHistory();
+      renderAll();
+      toast('已退回最近一次全部合格的摆位');
+    });
+    document.getElementById('btn-adopt').addEventListener('click', () => {
+      const lay = App.layout();
+      if (!lay) return;
+      App.layouts.forEach((l, i) => { l.adopted = (i === App.active); });
+      App.pushHistory();
+      renderAll();
+      toast(lay.adopted ? `已采纳方案 ${App.active + 1}（随项目保存，打印稿标注组号与安装次序）` : '');
+    });
   },
 
   /* ---- 操作按钮 ---- */
@@ -306,6 +349,7 @@ const Main = {
       sheets: App.sheets,
       parts: App.parts,
       defects: App.defects,
+      grainGroups: App.grainGroups,
       maxLayouts: 3,
     };
     if (keepLocked) {
@@ -334,6 +378,9 @@ const Main = {
       App.placeMode = null;
       App.resetHistory();
       renderAll();
+      // 排样引擎产出的摆位若全部接缝合格，记为最近合格摆位基线
+      App.layouts.forEach(l => Grain.saveCheckpoint(l));
+      renderAll();
       Canvas.zoomFit();
       const best = res.layouts[0];
       toast(`已生成 ${res.layouts.length} 个方案，最优利用率 ${fmtPct(best.stats.utilization)}` +
@@ -355,7 +402,9 @@ const Main = {
       sheets: App.sheets,
       parts: App.parts,
       defects: App.defects,
-      layouts,
+      grainGroups: App.grainGroups,
+      layouts: layouts.map(l => ({ ...l, _lastGood: undefined, adopted: !!l.adopted })),
+      adoptedLayoutId: (layouts.find(l => l.adopted) || {}).id || null,
       active: Math.min(App.active, Math.max(0, layouts.length - 1)),
       cutplan: App.cutplan,        // 裁切工序状态（切法覆盖/步骤顺序/进度）随项目保存
       cutStates: App._cutStates,
@@ -373,11 +422,19 @@ const Main = {
   applyProject(proj) {
     const d = proj.data || {};
     App.settings = Object.assign({ kerf: 3, margin: 5, spacing: 0 }, d.settings);
-    App.sheets = d.sheets || [];
+    App.sheets = (d.sheets || []).map(s => Object.assign(
+      { grainPeriod: 0, grainBase: { x: 0, y: 0 } }, s));
     App.parts = (d.parts || []).map(p => Object.assign(
       { faceReq: 'any', allowGrade: 0, allowZones: [] }, p));
     App.defects = d.defects || {};
+    App.grainGroups = (d.grainGroups || []).map(g => Object.assign(
+      { dir: 'h', productGap: 2, tolerance: 2, sameSheet: true, members: [] }, g));
     App.layouts = d.layouts || [];
+    // 恢复采纳标记（兼容旧项目按 id 保存的形式）
+    if (d.adoptedLayoutId != null) {
+      App.layouts.forEach(l => { l.adopted = (l.id === d.adoptedLayoutId); });
+    }
+    App.layouts.forEach(l => { delete l._lastGood; if (Grain.saveCheckpoint(l)) {/* 载入即建立基线 */} });
     App.active = Math.min(d.active || 0, Math.max(0, App.layouts.length - 1));
     App.selected = null;
     App.selectedDefect = null;
@@ -402,6 +459,12 @@ const Main = {
 function renderAll() {
   App.layouts.forEach(recomputeLayoutStats);  // 本地编辑后统计立即重算
   App.violations = Validate.check();
+  // 编辑后若当前摆位全部接缝合格（且无几何违规），更新"最近合格摆位"
+  App.layouts.forEach((l, i) => {
+    if (i === App.active && App.violations.messages.length === 0) {
+      Grain.saveCheckpoint(l);
+    }
+  });
   Canvas.render();
   UI.renderTabs();
   UI.renderSelection();
@@ -409,6 +472,8 @@ function renderAll() {
   UI.renderViolations();
   UI.renderUnplaced();
   UI.renderStatus();
+  UI.renderGrainToolbar();
+  if (typeof GrainUI !== 'undefined') GrainUI.renderPanel();
   UI.updateUndoRedo();
   CutUI.refresh();  // 面板打开时：排样变化 → 旧工序失效并重新分析 + 画布高亮
 }
