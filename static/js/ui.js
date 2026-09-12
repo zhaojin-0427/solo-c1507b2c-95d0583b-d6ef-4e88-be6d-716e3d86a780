@@ -293,6 +293,7 @@ const UI = {
       (u.conflicts || []).forEach((c) => {
         const ds = (c.defects || []).map(esc).join('、');
         chips += `<button class="conflict-chip" data-sheet="${c.sheetIndex}" data-key="${esc(App.defectKey(c.sheetId, c.instance))}"
+           data-defids="${esc((c.defectIds || []).join(','))}"
            title="定位到冲突板材与缺陷">📍 ${esc(c.sheetId)} #${c.instance + 1}：${ds}</button>`;
       });
       li.innerHTML = `${esc(u.uid)}（${esc(u.name || u.partId)}）<span class="r">${esc(u.reason || '')}</span>${chips}`;
@@ -300,12 +301,15 @@ const UI = {
       li.addEventListener('click', (e) => {
         const chip = e.target.closest('.conflict-chip');
         if (chip) {
-          // 定位到冲突板材；若后端给出了具体缺陷 id 则选中该缺陷
+          // 定位到冲突板材；优先选中后端给出的实际冲突缺陷
           const si = +chip.dataset.sheet;
           UI.focusSheet(si);
           const key = chip.dataset.key;
-          const firstDef = (App.defects[key] || [])[0];
-          App.selectedDefect = firstDef ? { key, id: firstDef.id } : null;
+          const wantIds = (chip.dataset.defids || '').split(',').filter(Boolean);
+          const list = App.defects[key] || [];
+          const want = wantIds.map(id => list.find(d => d.id === id)).find(Boolean);
+          App.selectedDefect = want ? { key, id: want.id }
+            : (list[0] ? { key, id: list[0].id } : null);
           App.selected = null;
           renderAll();
           return;

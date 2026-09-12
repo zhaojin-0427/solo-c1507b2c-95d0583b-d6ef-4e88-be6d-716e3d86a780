@@ -119,9 +119,55 @@ const Defects = {
   faceConflict(defectFace, partFaceReq) {
     const req = partFaceReq || 'any';
     const df = defectFace || 'both';
-    if (req === 'any') return false;
-    if (df === 'both' || req === 'both') return true;
+    if (df === 'both') return true;   // 贯穿/双面缺陷：翻板也避不开
+    if (req === 'any') return false;  // 单面缺陷 + 正反面均可 → 翻板避让
+    if (req === 'both') return true;
     return df === req;
+  },
+
+  /* 矩形与简单多边形是否【严格重叠】（面积交叠或边交叉）；仅外切/点接触不算 */
+  _onPolyEdge(x, y, pts) {
+    for (let i = 0; i < pts.length; i++) {
+      if (this._onSeg(pts[i], pts[(i + 1) % pts.length], { x, y })) return true;
+    }
+    return false;
+  },
+  rectPolyOverlap(x, y, w, h, pts) {
+    // 多边形顶点严格在矩形内
+    for (const p of pts) {
+      if (p.x > x + this.EPS && p.x < x + w - this.EPS &&
+          p.y > y + this.EPS && p.y < y + h - this.EPS) return true;
+    }
+    // 整体位于矩形内且质心严格在内（覆盖与零件完全重合等"顶点全在边上"情形）
+    if (pts.length >= 3 && w > this.EPS && h > this.EPS) {
+      if (pts.every(p => p.x >= x - this.EPS && p.x <= x + w + this.EPS &&
+                         p.y >= y - this.EPS && p.y <= y + h + this.EPS)) {
+        const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+        const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+        if (cx > x + this.EPS && cx < x + w - this.EPS &&
+            cy > y + this.EPS && cy < y + h - this.EPS) return true;
+      }
+    }
+    // 矩形顶点严格在多边形内
+    const corners = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+    for (const c of corners) {
+      if (pts.length >= 3 && this.pointInPoly(c.x, c.y, pts) &&
+          !this._onPolyEdge(c.x, c.y, pts)) return true;
+    }
+    // 边严格交叉（不含相接）
+    const proper = (a, b, c, d) => {
+      const d1 = this._ccw(c, d, a), d2 = this._ccw(c, d, b);
+      const d3 = this._ccw(a, b, c), d4 = this._ccw(a, b, d);
+      return (((d1 > this.EPS && d2 < -this.EPS) || (d1 < -this.EPS && d2 > this.EPS)) &&
+              ((d3 > this.EPS && d4 < -this.EPS) || (d3 < -this.EPS && d4 > this.EPS)));
+    };
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      for (let j = 0; j < 4; j++) {
+        if (proper(a, b, corners[j], corners[(j + 1) % 4])) return true;
+      }
+    }
+    return false;
   },
 
   /* 零件局部容许区 → 放置后坐标。旋转映射与后端一致：(lx,ly)→(x+ph-ly, y+lx) */
@@ -156,19 +202,27 @@ const Defects = {
     return false;
   },
 
-  /* 返回与放置矩形冲突的缺陷（已考虑面别/等级/容许区/安全外扩） */
+  /* 返回与放置矩形冲突的缺陷。单个缺陷放行的条件：
+     1) 面别不相遇（单面缺陷遇正反面均可的零件可翻板避开；双面缺陷不可）；
+     2) 综合容缺：等级 ≤ allowGrade 且核心整体在容许区内——两者必须同时满足；
+     3) 几何：与核心严格重叠，或净距 < 安全外扩（零外扩时仅严格重叠才阻止）。 */
   blockingDefect(p, pd, defects) {
     for (const d of defects || []) {
       if (!this.faceConflict(d.face, pd.faceReq)) continue;
       const pts = this.polyPoints(d);
-      const bb = this.bbox(d);
-      const gx = Math.max(0, bb.x - (p.x + p.w), p.x - bb.x1);
-      const gy = Math.max(0, bb.y - (p.y + p.h), p.y - bb.y1);
-      if (gx >= (+d.clearance || 0) - this.EPS && gy >= (+d.clearance || 0) - this.EPS) continue;
-      if ((+pd.allowGrade || 0) && (+d.grade || 0) <= +pd.allowGrade) continue;
-      if (this.insideAllowZone(pts, p, pd)) continue;
-      const dist = this.rectPolyDist(p.x, p.y, p.w, p.h, pts);
-      if (dist + this.EPS < (+d.clearance || 0)) return d;
+      const clearance = Math.max(0, +d.clearance || 0);
+      const gradeOk = (+pd.allowGrade || 0) && (+d.grade || 0) <= +pd.allowGrade;
+      const inZone = this.insideAllowZone(pts, p, pd);
+      if (gradeOk && inZone) continue;
+      if (this.rectPolyOverlap(p.x, p.y, p.w, p.h, pts)) return d;
+      if (clearance > this.EPS) {
+        const bb = this.bbox(d);
+        const gx = Math.max(0, bb.x - (p.x + p.w), p.x - bb.x1);
+        const gy = Math.max(0, bb.y - (p.y + p.h), p.y - bb.y1);
+        if (gx >= clearance - this.EPS && gy >= clearance - this.EPS) continue;
+        const dist = this.rectPolyDist(p.x, p.y, p.w, p.h, pts);
+        if (dist + this.EPS < clearance) return d;
+      }
     }
     return null;
   },
@@ -196,6 +250,29 @@ const Defects = {
     let n = 1;
     while (list.some(d => d.id === 'D' + n)) n++;
     return 'D' + n;
+  },
+
+  /* 增量重绘当前草稿：只替换草稿图层，不重建板材 SVG（保持 dblclick 目标稳定） */
+  _redrawDraft(sheetIdx) {
+    Canvas.svg.querySelectorAll('.defect-draft-layer').forEach(n => n.remove());
+    const dr = this._draft;
+    if (!dr) return;
+    const off = Canvas.sheetOffsets[sheetIdx];
+    if (!off) return;
+    // 草稿图层挂在板材 g 内（局部坐标）
+    const sheetG = Canvas.svg.querySelector(`g.sheet[data-idx="${sheetIdx}"]`);
+    if (!sheetG) return;
+    const g = this.el('g', { class: 'defect-draft-layer' }, sheetG);
+    if (dr.shape === 'rect' && dr.anchor) {
+      const cur = dr.current || dr.anchor;
+      const x = Math.min(dr.anchor.x, cur.x), y = Math.min(dr.anchor.y, cur.y);
+      this.el('rect', { class: 'defect-draft', x, y,
+        width: Math.abs(cur.x - dr.anchor.x), height: Math.abs(cur.y - dr.anchor.y) }, g);
+    } else if (dr.shape === 'poly') {
+      const ps = dr.verts.concat(dr.current ? [dr.current] : []);
+      if (ps.length >= 2) this.el('polyline', { class: 'defect-draft', points: this.pointsAttr(ps) }, g);
+      dr.verts.forEach(v => this.el('circle', { class: 'defect-draft-v', cx: v.x, cy: v.y, r: 5 }, g));
+    }
   },
 
   /* ============ 渲染 ============ */
@@ -358,7 +435,7 @@ const Defects = {
     if (handleEl) {
       const dg = handleEl.closest('g.defect');
       const id = dg.getAttribute('data-id');
-      const found = this.findDefect(key, id);
+      const found = App.findDefect(key, id);
       if (found.defect) {
         if (handleEl.classList.contains('defect-del-v')) {
           const hi = +(handleEl.getAttribute('data-h').replace('del', ''));
@@ -394,7 +471,8 @@ const Defects = {
         }
       }
       this.drag = { kind: 'draw-poly', sheetIdx };
-      renderAll();
+      // 增量重绘草稿（不整体 renderAll，避免双击时点击目标被替换导致 dblclick 丢失）
+      this._redrawDraft(sheetIdx);
       return true;
     }
 
@@ -425,11 +503,13 @@ const Defects = {
           localPt = { x: wp.x - off.x, y: wp.y - off.y };
         }
       }
-      this._draft.current = localPt;
-      renderAll();
+      if (this._draft) {
+        this._draft.current = localPt;
+        this._redrawDraft(d.sheetIdx);
+      }
       return true;
     }
-    const found = this.findDefect(d.key, d.id);
+    const found = App.findDefect(d.key, d.id);
     const def = found.defect;
     if (!def) return false;
     // 顶点编辑使用当前板局部坐标；整体拖动须换算回起始板（缺陷不能跨板）
@@ -460,6 +540,10 @@ const Defects = {
   onPointerUp() {
     const d = this.drag;
     if (!d) return false;
+    // 多边形逐点绘制在每次 pointerup 时保持 drag，直到闭合；矩形抬手成图
+    if (d.kind === 'draw-poly') {
+      return true;
+    }
     this.drag = null;
     if (d.kind === 'draw-rect') {
       this.finishRect();
@@ -476,6 +560,7 @@ const Defects = {
   finishRect() {
     const dr = this._draft;
     this._draft = null;
+    Canvas.svg.querySelectorAll('.defect-draft-layer').forEach(n => n.remove());
     if (!dr) return;
     const a = dr.anchor, b = dr.current;
     if (Math.abs(b.x - a.x) < 5 || Math.abs(b.y - a.y) < 5) { renderAll(); return; }
@@ -487,16 +572,38 @@ const Defects = {
   finishPoly() {
     const dr = this._draft;
     this._draft = null;
+    Canvas.svg.querySelectorAll('.defect-draft-layer').forEach(n => n.remove());
     if (!dr || dr.verts.length < 3) { renderAll(); return; }
     const list = App.defects[dr.key] || (App.defects[dr.key] = []);
     list.push(this._newDefect('poly', dr.verts.slice(), dr.key));
     this.commitDrawn(dr.key);
   },
 
-  /* 双击结束多边形 */
+  /* 双击结束多边形：双击的第一下可能已加入一个顶点，闭合时丢弃与末点/首点重复的点 */
   onDoubleClick(localPt) {
     if (App.defectMode === 'poly' && this._draft && this._draft.shape === 'poly') {
-      if (this._draft.verts.length >= 3) { this.finishPoly(); return true; }
+      const dr = this._draft;
+      // 丢弃双击多产生的、与首点或末点过近的尾点
+      if (dr.verts.length >= 2) {
+        const last = dr.verts[dr.verts.length - 1];
+        const prev = dr.verts[dr.verts.length - 2];
+        const first = dr.verts[0];
+        if (Math.hypot(last.x - prev.x, last.y - prev.y) < 5 ||
+            Math.hypot(last.x - first.x, last.y - first.y) < 12) {
+          dr.verts.pop();
+        }
+      }
+      if (dr.verts.length >= 3) { this.drag = null; this.finishPoly(); return true; }
+    }
+    return false;
+  },
+
+  /* Enter 键闭合当前多边形草稿 */
+  finishPolyDraft() {
+    if (App.defectMode === 'poly' && this._draft && this._draft.verts.length >= 3) {
+      this.drag = null;
+      this.finishPoly();
+      return true;
     }
     return false;
   },
@@ -547,7 +654,7 @@ const Defects = {
   deleteSelected() {
     const sel = App.selectedDefect;
     if (!sel) return false;
-    const f = this.findDefect(sel.key, sel.id);
+    const f = App.findDefect(sel.key, sel.id);
     if (!f.defect) return false;
     f.list.splice(f.list.indexOf(f.defect), 1);
     App.selectedDefect = null;

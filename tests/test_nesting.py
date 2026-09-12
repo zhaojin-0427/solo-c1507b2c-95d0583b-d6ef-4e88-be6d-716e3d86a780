@@ -303,20 +303,87 @@ class TestDefectAvoidance(unittest.TestCase):
                 f"{q['uid']} 与多边形缺陷净距不足")
 
     def test_grade_tolerance(self):
-        # 允许 ≤3 级 → 缺陷不避让，零件可放左上角；允许 ≤1 级 → 仍避让 3 级缺陷
+        # 联合条件：等级达标 + 缺陷核心整体在容许区内，两者同时满足才放行。
+        whole_zone = [{"points": [{"x": 0, "y": 0}, {"x": 300, "y": 0},
+                                  {"x": 300, "y": 200}, {"x": 0, "y": 200}]}]
+        small_d = self.rect_defect(points=[{"x": 120, "y": 120}, {"x": 200, "y": 180}])
+        # ≤3 级 + 整件容许区 → 覆盖小缺陷，零件可放左上角且全部合格
         p_ok = self.base(
-            parts=[dict(self.base()["parts"][0], allowGrade=3)],
-            defects={"S1#0": [self.rect_defect()]})
+            parts=[dict(self.base()["parts"][0], allowGrade=3, allowZones=whole_zone)],
+            defects={"S1#0": [small_d]})
         ps = generate_layouts(p_ok)["layouts"][0]["sheets"][0]["placements"]
         self.assertTrue(any(q["x"] == 5 and q["y"] == 5 for q in ps))
         self.assertEqual(generate_layouts(p_ok)["layouts"][0]["stats"]["qualifiedCount"], 4)
 
+        # 容许区外的 1 级缺陷：allowGrade=1 但无容许区覆盖 → 仍避让（旧逻辑错误放行）
+        p_out = self.base(
+            parts=[dict(self.base()["parts"][0], allowGrade=1)],
+            defects={"S1#0": [self.rect_defect(grade=1)]})
+        for q in generate_layouts(p_out)["layouts"][0]["sheets"][0]["placements"]:
+            self.assertFalse(q["x"] < 290 and q["x"] + q["w"] > 70 and
+                             q["y"] < 290 and q["y"] + q["h"] > 70)
+
+        # 容许区内但 3 级 > 允许 1 级 → 不满足联合条件，仍避让
+        p_over = self.base(
+            parts=[dict(self.base()["parts"][0], allowGrade=1, allowZones=whole_zone)],
+            defects={"S1#0": [dict(small_d, grade=3)]})
+        ps_over = generate_layouts(p_over)["layouts"][0]["sheets"][0]["placements"]
+        self.assertFalse(any(q["x"] == 5 and q["y"] == 5 for q in ps_over))
+
+        # 允许 ≤1 级 → 仍避让容许区外的 3 级大缺陷（回归）
         p_no = self.base(
             parts=[dict(self.base()["parts"][0], allowGrade=1)],
             defects={"S1#0": [self.rect_defect()]})
         for q in generate_layouts(p_no)["layouts"][0]["sheets"][0]["placements"]:
             self.assertFalse(q["x"] < 290 and q["x"] + q["w"] > 70 and
                              q["y"] < 290 and q["y"] + q["h"] > 70)
+
+    def test_zero_clearance_core_overlap_blocks(self):
+        from nesting import rect_poly_overlap
+        sq = [(100, 100), (200, 100), (200, 200), (100, 200)]
+        # 严格重叠阻止；外切/点接触不阻止；完全重合按重叠处理
+        self.assertTrue(rect_poly_overlap(110, 110, 50, 50, sq))
+        self.assertFalse(rect_poly_overlap(50, 100, 50, 100, sq))   # 右边外切 x=100
+        self.assertTrue(rect_poly_overlap(100, 100, 100, 100, sq))  # 完全重合
+        payload = {
+            "settings": {"kerf": 3, "margin": 0, "spacing": 0},
+            "sheets": [{"id": "S1", "name": "板", "width": 600, "height": 600,
+                        "grain": "none", "quantity": 1}],
+            "parts": [{"id": "P1", "name": "件", "width": 200, "height": 100,
+                       "quantity": 1, "rotatable": False, "grain": "none",
+                       "faceReq": "front", "allowGrade": 0}],
+            "defects": {"S1#0": [{"id": "D1", "type": "knot", "grade": 3,
+                                  "face": "front", "clearance": 0, "shape": "poly",
+                                  "points": [{"x": x, "y": y} for x, y in sq]}]},
+        }
+        lay = generate_layouts(payload)["layouts"][0]
+        for q in lay["sheets"][0]["placements"]:
+            self.assertFalse(rect_poly_overlap(q["x"], q["y"], q["w"], q["h"], sq),
+                             "零外扩缺陷核心被零件压住")
+
+    def test_both_face_defect_blocks_any_part(self):
+        from nesting import face_conflict
+        # 双面/贯穿缺陷：正反面均可（any）的零件也无法靠翻板避开
+        self.assertTrue(face_conflict("both", "any"))
+        self.assertFalse(face_conflict("front", "any"))
+        payload = {
+            "settings": {"kerf": 3, "margin": 0, "spacing": 0},
+            "sheets": [{"id": "S1", "name": "板", "width": 600, "height": 600,
+                        "grain": "none", "quantity": 1}],
+            "parts": [{"id": "P1", "name": "件", "width": 100, "height": 100,
+                       "quantity": 1, "rotatable": False, "grain": "none",
+                       "faceReq": "any", "allowGrade": 0}],
+            "defects": {"S1#0": [{"id": "D1", "type": "knot", "grade": 3,
+                                  "face": "both", "clearance": 0, "shape": "poly",
+                                  "points": [{"x": x, "y": y} for x, y in
+                                             [(100, 100), (200, 100), (200, 200), (100, 200)]]}]},
+        }
+        lay = generate_layouts(payload)["layouts"][0]
+        from nesting import rect_poly_overlap
+        for q in lay["sheets"][0]["placements"]:
+            self.assertFalse(
+                rect_poly_overlap(q["x"], q["y"], q["w"], q["h"],
+                                  [(100, 100), (200, 100), (200, 200), (100, 200)]))
 
     def test_face_meeting(self):
         from nesting import face_conflict
@@ -332,9 +399,9 @@ class TestDefectAvoidance(unittest.TestCase):
         self.assertEqual((q0["x"], q0["y"]), (5, 5))
 
     def test_allowzone_exempts_contained_defect(self):
-        # 小缺陷整体可落入第一个零件内部 + 整件容许区 → 可放左上角且合格
+        # 小缺陷整体可落入第一个零件内部 + 整件容许区 + 等级达标 → 可放左上角且合格
         p = self.base(
-            parts=[dict(self.base()["parts"][0], allowZones=[
+            parts=[dict(self.base()["parts"][0], allowGrade=3, allowZones=[
                 {"points": [{"x": 0, "y": 0}, {"x": 300, "y": 0},
                             {"x": 300, "y": 200}, {"x": 0, "y": 200}]}])],
             defects={"S1#0": [self.rect_defect(
@@ -343,9 +410,18 @@ class TestDefectAvoidance(unittest.TestCase):
         ps = lay["sheets"][0]["placements"]
         self.assertTrue(any(q["x"] == 5 and q["y"] == 5 for q in ps))
         self.assertEqual(lay["stats"]["qualifiedCount"], 4)
+        # 有容许区但允许等级 0（不容许任何缺陷）→ 仍避让
+        p0 = self.base(
+            parts=[dict(self.base()["parts"][0], allowGrade=0, allowZones=[
+                {"points": [{"x": 0, "y": 0}, {"x": 300, "y": 0},
+                            {"x": 300, "y": 200}, {"x": 0, "y": 200}]}])],
+            defects={"S1#0": [self.rect_defect(
+                points=[{"x": 120, "y": 120}, {"x": 200, "y": 180}])]})
+        ps0 = generate_layouts(p0)["layouts"][0]["sheets"][0]["placements"]
+        self.assertFalse(any(q["x"] == 5 and q["y"] == 5 for q in ps0))
         # 容许区仅左 50mm，缺陷 x∈[120,200] → 不豁免，仍避让
         p2 = self.base(
-            parts=[dict(self.base()["parts"][0], allowZones=[
+            parts=[dict(self.base()["parts"][0], allowGrade=3, allowZones=[
                 {"points": [{"x": 0, "y": 0}, {"x": 50, "y": 0},
                             {"x": 50, "y": 200}, {"x": 0, "y": 200}]}])],
             defects={"S1#0": [self.rect_defect(
@@ -373,6 +449,8 @@ class TestDefectAvoidance(unittest.TestCase):
         self.assertIn("D1", u["reason"])
         self.assertEqual(u["conflicts"][0]["sheetId"], "S1")
         self.assertIn("D1", u["conflicts"][0]["defects"][0])
+        # 精确定位：conflicts 携带实际冲突缺陷 id（提示文案与定位对象一致）
+        self.assertEqual(u["conflicts"][0]["defectIds"], ["D1"])
 
     def test_locked_part_on_defect_flagged_unqualified(self):
         p = {
@@ -396,11 +474,22 @@ class TestDefectAvoidance(unittest.TestCase):
         p = self.base(
             sheets=[{"id": "S1", "name": "板", "width": 1000, "height": 500,
                      "grain": "none", "quantity": 2}],
-            defects={"S1#1": [self.rect_defect()]})
+            defects={"S1#1": [self.rect_defect(clearance=50)]})
         lay = generate_layouts(p)["layouts"][0]
         s0, s1 = lay["sheets"]
         self.assertEqual(len(s1["placements"]), 0)
         self.assertEqual(len(s0["placements"]), 4)
+        # 避让碎料只统计方案所用板材：#1 未使用 → 合计 0，#1 单板字段也为 0
+        self.assertEqual(lay["stats"]["defectScrap"], 0)
+        self.assertEqual(s1["defectScrap"], 0)
+        # 已用缺陷板则计入：缺陷放在 #0 且 #0 被使用 → 合计 > 0
+        p2 = self.base(
+            sheets=[{"id": "S1", "name": "板", "width": 1000, "height": 500,
+                     "grain": "none", "quantity": 2}],
+            defects={"S1#0": [self.rect_defect(clearance=50)]})
+        lay2 = generate_layouts(p2)["layouts"][0]
+        self.assertGreater(lay2["stats"]["defectScrap"], 0)
+        self.assertEqual(lay2["sheets"][1]["defectScrap"], 0)  # 未使用板为 0
 
     def test_defect_persisted_via_project_api(self):
         import app as flask_app

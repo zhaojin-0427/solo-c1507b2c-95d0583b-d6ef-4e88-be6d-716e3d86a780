@@ -131,16 +131,72 @@ def rect_poly_dist(x, y, w, h, points):
 def face_conflict(defect_face, part_face_req):
     """缺陷影响面与零件正反面要求是否在同一面相遇。
 
-    any=零件正反面均可（可翻板避让）；front/back=该面为可见面须无缺陷；
-    both=双面均可见。缺陷 both（贯穿/双面）对任何有单面要求的零件都冲突。
+    any=零件正反面均可，可通过翻板避开【单面】缺陷；但双面/贯穿缺陷两面都有，
+    翻板也无法避开，故 any 仍与 both 缺陷相遇。front/back=该面为可见面须无缺陷；
+    both=双面均可见。
     """
     req = part_face_req or 'any'
     df = defect_face or 'both'
+    if df == 'both':
+        return True          # 贯穿/双面缺陷：任何零件都无法靠翻板避开
     if req == 'any':
-        return False
-    if df == 'both' or req == 'both':
+        return False         # 单面缺陷 + 正反面均可 → 翻板避让
+    if req == 'both':
         return True
     return df == req
+
+
+def rect_poly_overlap(x, y, w, h, points):
+    """矩形与简单多边形是否有【严格重叠】（面积交叠或边交叉）；仅外切/点接触不算。"""
+    pts = [_pt(p) for p in points]
+    rect_corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+    # 多边形顶点在矩形内部（严格，不在边界上）
+    for px, py in pts:
+        if x + EPS < px < x + w - EPS and y + EPS < py < y + h - EPS:
+            return True
+    # 多边形整体位于矩形内（凸矩形：顶点全在内或边上 ⇒ 整个多边形在内），
+    # 且质心严格在内——覆盖缺陷与零件完全重合等"顶点全在边上但面积重叠"的情形
+    if len(pts) >= 3 and w > EPS and h > EPS:
+        inside_on = [x - EPS <= px <= x + w + EPS and y - EPS <= py <= y + h + EPS
+                     for px, py in pts]
+        if all(inside_on):
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            if x + EPS < cx < x + w - EPS and y + EPS < cy < y + h - EPS:
+                return True
+    # 矩形顶点在多边形内部（严格，排除正好落在多边形边上的角点）
+    if len(pts) >= 3:
+        for cx, cy in rect_corners:
+            if point_in_poly(cx, cy, pts) and not _point_on_poly_edge(cx, cy, pts):
+                return True
+    # 边与边严格相交（不含相接）
+    rect_edges = [(rect_corners[i], rect_corners[(i + 1) % 4]) for i in range(4)]
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        for c, dd in rect_edges:
+            if _seg_cross_proper(a, b, c, dd):
+                return True
+    return False
+
+
+def _point_on_poly_edge(x, y, pts, tol=1e-6):
+    for i in range(len(pts)):
+        a, b = pts[i], pts[(i + 1) % len(pts)]
+        if abs((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])) <= tol and \
+                min(a[0], b[0]) - tol <= x <= max(a[0], b[0]) + tol and \
+                min(a[1], b[1]) - tol <= y <= max(a[1], b[1]) + tol:
+            return True
+    return False
+
+
+def _seg_cross_proper(p1, p2, p3, p4):
+    """两线段是否严格交叉（端点相接不算）。"""
+    def ccw(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1, d2 = ccw(p3, p4, p1), ccw(p3, p4, p2)
+    d3, d4 = ccw(p1, p2, p3), ccw(p1, p2, p4)
+    return ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS)) and \
+           ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS))
 
 
 def transform_zone(zone, x, y, w, h, rotated, pw, ph):
@@ -332,43 +388,52 @@ def _conflicts(x, y, w, h, placed, gap):
 
 
 def _blocking_defect(x, y, w, h, inst, defects):
-    """返回阻止该矩形放在此位置的缺陷；可避让（等级容许/容许区内）则不阻止。
+    """返回阻止该矩形放在此位置的缺陷；可避让（面别/等级+容许区）则不阻止。
 
-    缺陷坐标与候选矩形均在可用区域坐标系（扣除 margin）。判定顺序：
-    面别相遇 → 外接盒快速排除 → 等级容许 → 核心距离 ≥ 外扩 → 容许区豁免。
+    缺陷坐标与候选矩形均在可用区域坐标系（扣除 margin）。单个缺陷放行的条件：
+      1. 面别不相遇（单面缺陷遇正反面均可的零件，可翻板避开）；
+      2. 综合容缺：等级 ≤ 允许等级 且 缺陷核心整体在容许区内——两者必须同时满足；
+         允许等级为 0 表示任何等级都不容许；
+      3. 几何避让：与核心严格重叠，或净距 < 安全外扩量。零外扩时仅严格重叠才阻止，
+         外切/点接触不阻止。
     """
     for d in defects:
         if not face_conflict(d['face'], inst.get('faceReq', 'any')):
             continue
         pts = d['points']
-        dx0, dy0, dx1, dy1 = poly_bbox(pts)
-        # 外接盒分离：两个轴向上最近角点间距均 ≥ 外扩 → 逐边距离必 ≥ 外扩
-        gx = max(0.0, dx0 - (x + w), x - dx1)
-        gy = max(0.0, dy0 - (y + h), y - dy1)
-        if gx >= d['clearance'] - EPS and gy >= d['clearance'] - EPS:
-            continue
+        clearance = max(0.0, d.get('clearance', 0.0))
+        # 综合容缺判定：等级达标 + 核心整体落入同一容许区，二者同时满足才放行
+        allowed_by_grade = bool(inst.get('allowGrade', 0)) and d['grade'] <= inst['allowGrade']
         rotated = abs(w - inst['w']) > EPS or abs(h - inst['h']) > EPS
-        # 等级容许：零件可接受该等级缺陷（容许区外的核心也不避让）
-        if inst.get('allowGrade', 0) and d['grade'] <= inst['allowGrade']:
+        in_zone = defect_inside_allowzone(pts, x, y, w, h, inst, rotated)
+        if allowed_by_grade and in_zone:
             continue
-        # 容许区豁免：缺陷核心整体落入零件容许区
-        if defect_inside_allowzone(pts, x, y, w, h, inst, rotated):
-            continue
-        dist = rect_poly_dist(x, y, w, h, pts)
-        if dist + EPS < d['clearance']:
+        # 几何冲突：严格重叠（零外扩时即因此阻止）或净距不足外扩
+        if rect_poly_overlap(x, y, w, h, pts):
             return d
+        if clearance > EPS:
+            dx0, dy0, dx1, dy1 = poly_bbox(pts)
+            # 外接盒分离：两个轴向上最近角点间距均 ≥ 外扩 → 逐边距离必 ≥ 外扩
+            gx = max(0.0, dx0 - (x + w), x - dx1)
+            gy = max(0.0, dy0 - (y + h), y - dy1)
+            if gx >= clearance - EPS and gy >= clearance - EPS:
+                continue
+            dist = rect_poly_dist(x, y, w, h, pts)
+            if dist + EPS < clearance:
+                return d
     return None
 
 
 def _defect_candidates(inst, defects):
-    """围绕缺陷禁入区生成候选原点：外接盒外侧角点 + 各多边形顶点。"""
+    """围绕缺陷禁入区生成候选原点：外接盒外侧角点 + 各多边形顶点。
+
+    面别相遇即产生候选（计算量可忽略），候选位置是否可行由 _blocking_defect
+    按"等级+容许区"综合容缺与净距精确判定。"""
     cands = set()
     for d in defects:
         if not face_conflict(d['face'], inst.get('faceReq', 'any')):
             continue
-        if inst.get('allowGrade', 0) and d['grade'] <= inst['allowGrade']:
-            continue  # 等级容许的缺陷不产生绕让候选
-        c = d['clearance']
+        c = max(0.0, d['clearance'])
         x0, y0, x1, y1 = poly_bbox(d['points'])
         for cx, cy in ((x1 + c, y0 - c), (x0 - c, y1 + c), (x1 + c, y1 + c),
                        (x0 - c, y0 - c), (x1 + c, 0.0), (0.0, y1 + c)):
@@ -499,7 +564,8 @@ def _unplaced_reason(inst, states, settings):
             blockers.append({'sheetIndex': idx, 'sheetId': st['def']['sheetId'],
                              'instance': st['def']['instance'],
                              'name': st['def'].get('name') or st['def']['sheetId'],
-                             'defects': [defect_label(d) for d in block_ids]})
+                             'defects': [defect_label(d) for d in block_ids],
+                             'defectIds': [d['id'] for d in block_ids]})
     if blockers:
         first = blockers[0]
         loc = f"板材 {first['sheetId']} #{first['instance'] + 1}"
@@ -594,20 +660,24 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None):
             'w': r['w'], 'h': r['h'], 'rotated': r['rotated'],
             'locked': r.get('locked', False),
         } for r in st['placed']]
+        # 每张已用板材自身的避让碎料（未使用板不计入方案比较）
+        sheet_scrap = sum(expanded_defect_area(d, margin, st['uw'], st['uh'])
+                          for d in defects_abs(st)) if st['placed'] else 0.0
         out_sheets.append({
             'sheetId': st['def']['sheetId'], 'name': st['def']['name'],
             'instance': st['def']['instance'],
             'width': st['def']['w'], 'height': st['def']['h'],
             'placements': placements,
+            'defectScrap': round(sheet_scrap, 1),
         })
 
     used = [st for st in states if st['placed']]
     placed_area = sum(r['w'] * r['h'] for st in states for r in st['placed'])
     used_area = sum(st['def']['w'] * st['def']['h'] for st in used) or 1.0
     cuts = sum(_sheet_cuts(st['placed'], st['uw'], st['uh']) for st in states)
-    # 避让碎料面积：缺陷禁入区（核心+外扩）落在可用区域内的估算面积合计
+    # 避让碎料面积：仅统计方案实际使用的板材（未使用缺陷板不影响方案比较）
     defect_scrap = sum(expanded_defect_area(d, margin, st['uw'], st['uh'])
-                       for st in states for d in defects_abs(st))
+                       for st in used for d in defects_abs(st))
 
     stats = {
         'utilization': placed_area / used_area,

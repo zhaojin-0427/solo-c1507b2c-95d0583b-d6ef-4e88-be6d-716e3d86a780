@@ -16,6 +16,11 @@ const PartTol = {
     if (p.faceReq == null) p.faceReq = 'any';
     if (p.allowGrade == null) p.allowGrade = 0;
     if (!Array.isArray(p.allowZones)) p.allowZones = [];
+    // 取消时还原：进入模态框前的完整容缺字段快照
+    this._snapshot = {
+      faceReq: p.faceReq, allowGrade: p.allowGrade,
+      allowZones: JSON.parse(JSON.stringify(p.allowZones)),
+    };
     this.draftVerts = null;
 
     const root = document.getElementById('modal-root');
@@ -61,15 +66,17 @@ const PartTol = {
 
     document.getElementById('tol-face').addEventListener('change', e => { p.faceReq = e.target.value; });
     document.getElementById('tol-grade').addEventListener('change', e => { p.allowGrade = +e.target.value; });
-    const close = () => { root.innerHTML = ''; };
-    document.getElementById('tol-cancel').addEventListener('click', close);
-    root.addEventListener('click', (e) => { if (e.target === root) close(); });
+    const close = (save) => {
+      if (!save) { this.restoreSnapshot(); renderAll(); }
+      root.innerHTML = '';
+    };
+    document.getElementById('tol-cancel').addEventListener('click', () => close(false));
+    root.addEventListener('click', (e) => { if (e.target === root) close(false); });
     document.getElementById('tol-ok').addEventListener('click', () => {
       // 未闭合的草稿丢弃
       this.draftVerts = null;
       App.pushHistory();
-      close();
-      renderAll();
+      close(true);
       toast('容缺设置已保存');
     });
     document.getElementById('tol-draw').addEventListener('click', () => {
@@ -83,6 +90,14 @@ const PartTol = {
     this.bindSvg();
     this.renderSvg();
     this.renderZoneList();
+  },
+
+  restoreSnapshot() {
+    const p = this.part, snap = this._snapshot;
+    if (!p || !snap) return;
+    p.faceReq = snap.faceReq;
+    p.allowGrade = snap.allowGrade;
+    p.allowZones = snap.allowZones;
   },
 
   bindSvg() {

@@ -207,7 +207,13 @@ const Main = {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); App.undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); App.redo(); return; }
       if (e.key === 'Escape') {
-        if (App.defectMode || Defects.drag || Defects._draft) {
+        // 绘制多边形时先取消当前草稿，再退出绘制模式
+        if (App.defectMode === 'poly' && Defects._draft) {
+          Defects._draft = null;
+          renderAll();
+          return;
+        }
+        if (App.defectMode || Defects.drag) {
           App.defectMode = null;
           Defects.cancelDraft();
           Canvas.svg.classList.remove('defect-mode');
@@ -218,6 +224,11 @@ const Main = {
         App.selected = null;
         Canvas.svg.classList.remove('place-mode');
         renderAll();
+        return;
+      }
+      if (e.key === 'Enter' && App.defectMode === 'poly' && Defects._draft) {
+        e.preventDefault();
+        Defects.finishPolyDraft();
         return;
       }
       if (e.key === ' ' && App.cutOpen) { e.preventDefault(); CutUI.play(); return; }

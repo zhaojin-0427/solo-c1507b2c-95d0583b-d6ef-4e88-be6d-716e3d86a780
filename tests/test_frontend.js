@@ -26,14 +26,16 @@ global.document = {
   getElementById: (id) => _elements[id] || null,
 };
 global.renderAll = () => {};  // App.undo/redo 会调用，测试中无需真实渲染
+global.Canvas = { svg: { querySelectorAll: () => [] }, sheetOffsets: [] };
 
 /* ---- 加载被测模块 ---- */
-const src = ['state.js', 'defects.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js']
+const src = ['state.js', 'defects.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js', 'parttol.js']
   .map(f => fs.readFileSync(path.join(__dirname, '..', 'static', 'js', f), 'utf8'))
   .join('\n');
 eval(src + `
 global.App = App; global.Validate = Validate; global.Print = Print;
 global.CutPlan = CutPlan; global.CutUI = CutUI; global.Defects = Defects;
+global.PartTol = PartTol;
 global.recomputeLayoutStats = recomputeLayoutStats;
 global.guillotineCuts = guillotineCuts;
 `);
@@ -546,6 +548,77 @@ section('裁切工序：面板开合与画布高亮层');
   }
 }
 
+/* ================= 板面缺陷：拖动 / 调整 / 闭合（纯状态） ================= */
+section('缺陷：核心拖动、顶点调整与多边形闭合后立即复核');
+{
+  global.Canvas = global.Canvas || { svg: { querySelectorAll: () => [], querySelector: () => null }, sheetOffsets: [] };
+  setupDefectLayout();
+  const lay = App.layout();
+  // D1 初始核心 (100,100)-(200,200)，放一个压在核心上的零件
+  lay.sheets[0].placements = [
+    { uid: 'P1#1', partId: 'P1', name: '门板', x: 110, y: 110, w: 80, h: 80, rotated: false, locked: false }];
+  let res = Validate.check();
+  ok(res.vmap.get('P1#1').has('defect'), '初始：P1#1 与 D1 冲突');
+
+  // 模拟整体拖动缺陷 300mm 右移（Defects.onPointerMove 的变更逻辑）
+  const d0 = App.defects['S1#0'][0];
+  const orig = JSON.stringify(d0.points);
+  const drag = { kind: 'move', key: 'S1#0', id: 'D1', start: { x: 150, y: 150 } };
+  d0.points = JSON.parse(orig).map(p => ({ x: p.x + 300, y: p.y }));
+  res = Validate.check();   // 每次改动后立即复核
+  ok(!res.vmap.get('P1#1') || !res.vmap.get('P1#1').has('defect'), '拖走缺陷后立即解除冲突');
+  ok(res.dmap.get('S1#0:D1') == null, 'D1 不再影响任何零件');
+  // 拖回
+  d0.points = JSON.parse(orig);
+  res = Validate.check();
+  ok(res.vmap.get('P1#1').has('defect'), '拖回后立即重新标记冲突');
+
+  // 矩形对角手柄调整：把第二个对角点拉到 (150,150)
+  d0.points = [{ x: 100, y: 100 }, { x: 150, y: 150 }];
+  res = Validate.check();
+  ok(res.vmap.get('P1#1').has('defect'), '调小后的缺陷核心仍被 P1#1 压住 → 冲突');
+  // 拉到远离零件处
+  d0.points = [{ x: 100, y: 100 }, { x: 105, y: 105 }];
+  res = Validate.check();
+  // 小核心(100..105)与零件(110..190)严格不重叠；外扩30仍侵入 → 冲突
+  ok(res.vmap.get('P1#1').has('defect'), '外扩30仍侵入零件 → 冲突');
+  // 外扩改为 0 且仅相邻不重叠 → 不冲突
+  d0.clearance = 0;
+  res = Validate.check();
+  ok(!res.vmap.get('P1#1') || !res.vmap.get('P1#1').has('defect'), '零外扩且核心在零件外 → 不冲突');
+
+  // 多边形闭合：≥3 顶点闭合后形成缺陷并可立即检出冲突
+  App.defects['S1#0'] = [];
+  App.defectMode = 'poly';
+  Defects._draft = { shape: 'poly', key: 'S1#0',
+    verts: [{ x: 120, y: 120 }, { x: 180, y: 120 }, { x: 150, y: 180 }], current: null };
+  Defects.drag = null;
+  Defects.finishPolyDraft();
+  eq(App.defects['S1#0'].length, 1, '双击/Enter 闭合后多边形缺陷入库（不再停留草稿）');
+  eq(Defects._draft, null, '闭合后草稿清除');
+  res = Validate.check();
+  ok(res.vmap.get('P1#1') && res.vmap.get('P1#1').has('defect'), '新闭合多边形立即参与复核');
+}
+
+/* ================= 板面缺陷：容缺模态取消不保存 ================= */
+section('缺陷：容缺设置取消还原面别/等级/容许区');
+{
+  setupDefectLayout();
+  const p1 = App.partDef('P1');
+  const saved = { faceReq: p1.faceReq, allowGrade: p1.allowGrade,
+    allowZones: JSON.parse(JSON.stringify(p1.allowZones)) };
+  // 模拟 PartTol 打开时快照 + 编辑 + 取消还原（不依赖 DOM）
+  PartTol.part = p1;
+  PartTol._snapshot = { faceReq: p1.faceReq, allowGrade: p1.allowGrade,
+    allowZones: JSON.parse(JSON.stringify(p1.allowZones)) };
+  p1.faceReq = 'both'; p1.allowGrade = 3;
+  p1.allowZones.push({ points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }] });
+  PartTol.restoreSnapshot();
+  eq(p1.faceReq, saved.faceReq, '取消：面别还原');
+  eq(p1.allowGrade, saved.allowGrade, '取消：允许等级还原');
+  eq(p1.allowZones.length, saved.allowZones.length, '取消：容许区数量还原');
+}
+
 /* ================= 板面缺陷避让 ================= */
 section('缺陷：几何工具（点在多边形内 / 矩形-多边形距离 / 面别）');
 {
@@ -604,19 +677,42 @@ section('缺陷：blockingDefect 安全外扩 / 等级 / 面别 / 容许区');
   ok(!Defects.blockingDefect({ x: 0, y: 0, w: 60, h: 100 }, p1, list), '净距 40 ≥ 外扩30 → 不冲突');
   // 反面要求的 P2：正面缺陷不相遇
   ok(!Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, App.partDef('P2'), list), '面别不相遇 → 不冲突');
-  // P3 允许 1 级：3 级缺陷仍冲突
+  // P3 允许 1 级：3 级缺陷仍冲突；1 级缺陷在容许区外也冲突（等级与容许区须同时满足）
   ok(Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, App.partDef('P3'), list), '3级 > 允许1级 → 冲突');
+  const d1 = { ...list[0], grade: 1 };
+  ok(Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, App.partDef('P3'), [d1]),
+    '容许区外的1级缺陷（等级够但无容许区覆盖）→ 仍冲突');
+  // 允许3级但无容许区 → 仍冲突；允许3级且核心整体落入容许区 → 放行
   const p3b = { ...App.partDef('P3'), allowGrade: 3 };
-  ok(!Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, p3b, list), '允许3级 → 等级容许');
-  // 容许区：缺陷整体在零件内部且落入容许区 → 豁免
-  const p1z = { ...p1, allowZones: [{ points: [
+  ok(Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, p3b, list), '允许3级但无容许区 → 仍冲突');
+  const p3z = { ...p3b, allowZones: [{ points: [
+    { x: 90, y: 90 }, { x: 210, y: 90 }, { x: 210, y: 210 }, { x: 90, y: 210 }] }] };
+  ok(!Defects.blockingDefect({ x: 0, y: 0, w: 300, h: 200, rotated: false }, p3z, list),
+    '3级缺陷整体落入容许区且等级达标 → 放行');
+  // 区内但等级超限：允许1级 + 容许区覆盖，3级缺陷仍冲突
+  const p1g1 = { ...p1, allowGrade: 1, allowZones: [{ points: [
+    { x: 90, y: 90 }, { x: 210, y: 90 }, { x: 210, y: 210 }, { x: 90, y: 210 }] }] };
+  ok(Defects.blockingDefect({ x: 0, y: 0, w: 300, h: 200, rotated: false }, p1g1, list),
+    '容许区内3级 > 允许1级 → 仍冲突');
+  // 容许区：1级缺陷整体在零件内部且落入容许区，允许1级 → 豁免
+  const p1z = { ...p1, allowGrade: 1, allowZones: [{ points: [
     { x: 60, y: 60 }, { x: 260, y: 60 }, { x: 260, y: 260 }, { x: 60, y: 260 }] }] };
   const placement = { x: 0, y: 0, w: 300, h: 200, rotated: false };
-  ok(!Defects.blockingDefect(placement, p1z, list), '缺陷整体落入容许区 → 豁免');
+  ok(!Defects.blockingDefect(placement, p1z, [d1]), '区内1级 + 允许1级 → 豁免');
   // 容许区只覆盖左 50mm：缺陷 x∈[100,200] 不在区内 → 仍冲突
-  const p1z2 = { ...p1, allowZones: [{ points: [
+  const p1z2 = { ...p1, allowGrade: 1, allowZones: [{ points: [
     { x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 200 }, { x: 0, y: 200 }] }] };
-  ok(Defects.blockingDefect(placement, p1z2, list), '容许区未覆盖缺陷 → 仍冲突');
+  ok(Defects.blockingDefect(placement, p1z2, [d1]), '容许区未覆盖缺陷 → 仍冲突');
+  // 零外扩核心：严格重叠阻止，外切不阻止
+  const d0 = { ...list[0], clearance: 0 };
+  ok(Defects.blockingDefect({ x: 110, y: 110, w: 50, h: 50 }, p1, [d0]), '零外扩：压住核心 → 冲突');
+  ok(!Defects.blockingDefect({ x: 50, y: 100, w: 50, h: 100 }, p1, [d0]), '零外扩：外切核心 → 不冲突');
+  // 双面缺陷 vs 正反面均可 → 仍冲突
+  const db = { ...list[0], face: 'both', clearance: 0 };
+  const pAny = { ...p1, faceReq: 'any' };
+  ok(Defects.blockingDefect({ x: 110, y: 110, w: 50, h: 50 }, pAny, [db]), '双面缺陷 vs 正反面均可 → 冲突');
+  ok(!Defects.blockingDefect({ x: 110, y: 110, w: 50, h: 50 }, pAny,
+    [{ ...db, face: 'front' }]), '单面缺陷 vs 正反面均可 → 可翻板放行');
   // 旋转零件容许区坐标映射（视觉顺时针）：局部容许区 (0,0)-(40,200)
   const p1r = { ...p1, width: 300, height: 200, allowZones: [{ points: [
     { x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 200 }, { x: 0, y: 200 }] }] };
@@ -657,6 +753,23 @@ section('缺陷：Validate 复核与受影响零件映射');
   eq(lay.stats.qualifiedCount, 2, '合格零件数 2');
   eq(lay.stats.defectConflictCount, 1, '缺陷冲突数 1');
   ok(lay.stats.defectScrap > 0, '避让碎料面积计入统计');
+
+  // 避让碎料只统计方案实际使用的板材：第二张板有缺陷但无零件 → 不计入
+  App.defects['S1#1'] = [{ id: 'D2', type: 'knot', grade: 3, face: 'front',
+    clearance: 50, shape: 'rect', points: [{ x: 10, y: 10 }, { x: 100, y: 100 }] }];
+  lay.sheets.push({ sheetId: 'S1', name: '板', instance: 1, width: 1000, height: 500, placements: [] });
+  const scrapOneUsed = (() => { recomputeLayoutStats(lay); return lay.stats.defectScrap; })();
+  // 移除已用板上的缺陷 → 只剩未用板缺陷，合计应为 0
+  const d0 = App.defects['S1#0'].splice(0, 1)[0];
+  recomputeLayoutStats(lay);
+  eq(lay.stats.defectScrap, 0, '未使用的缺陷板不计入避让碎料');
+  // 恢复
+  App.defects['S1#0'].push(d0);
+  lay.sheets.pop();
+  delete App.defects['S1#1'];
+  recomputeLayoutStats(lay);
+  ok(lay.stats.defectScrap > 0 && Math.abs(lay.stats.defectScrap - scrapOneUsed) < 1e-6,
+    '已用缺陷板的碎料恢复计入');
 
   // 拖动缺陷后立即复核：把缺陷移到 P3#1 处 → P3 变为受影响件
   App.defects['S1#0'][0].points = [{ x: 650, y: 280 }, { x: 750, y: 380 }];

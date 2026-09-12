@@ -160,12 +160,8 @@ function recomputeLayoutStats(lay) {
     const ps = si.placements;
     placedCount += ps.length;
     ps.forEach(p => { placedArea += p.w * p.h; });
-    // 板面缺陷：合格性复核 + 避让碎料面积（与后端同口径估算）
     const defects = (typeof Defects !== 'undefined')
       ? App.defectsOn(si.sheetId, si.instance) : [];
-    defects.forEach(d => {
-      scrap += Defects.expandedArea(d, m, W - 2 * m, H - 2 * m);
-    });
     ps.forEach((p) => {
       const pd = App.uidPart(p.uid);
       if (pd) {
@@ -176,6 +172,10 @@ function recomputeLayoutStats(lay) {
     if (!ps.length) return;
     usedSheets++;
     usedArea += W * H;
+    // 避让碎料只统计方案实际使用的板材（未使用的缺陷板不计入）
+    defects.forEach(d => {
+      scrap += Defects.expandedArea(d, m, W - 2 * m, H - 2 * m);
+    });
     cuts += guillotineCuts(ps);
     const minx = Math.min(...ps.map(p => p.x));
     const miny = Math.min(...ps.map(p => p.y));
