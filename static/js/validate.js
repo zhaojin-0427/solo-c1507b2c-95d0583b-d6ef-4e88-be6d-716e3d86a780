@@ -12,12 +12,14 @@ const Validate = {
   },
   grainLabel(g) { return { horizontal: '横向', vertical: '纵向' }[g] || '无'; },
 
-  /* 全量校验当前方案，返回 { vmap: Map<uid, Set<code>>, messages: [{uid, code, msg}] } */
+  /* 全量校验当前方案，返回 {
+       vmap: Map<uid, Set<code>>, dmap: Map<'key:did', [uid...]>, messages: [...] } */
   check() {
     const vmap = new Map();
+    const dmap = new Map();
     const messages = [];
     const lay = App.layout();
-    if (!lay) return { vmap, messages };
+    if (!lay) return { vmap, dmap, messages };
     const gap = this.gap();
     const margin = this.margin();
     const seenMsg = new Set();
@@ -26,16 +28,32 @@ const Validate = {
       if (!vmap.has(uid)) vmap.set(uid, new Set());
       vmap.get(uid).add(code);
     };
-    const say = (uid, code, msg) => {
+    const flagDefect = (key, did, uid) => {
+      const k = key + ':' + did;
+      if (!dmap.has(k)) dmap.set(k, []);
+      if (dmap.get(k).indexOf(uid) < 0) dmap.get(k).push(uid);
+    };
+    const say = (uid, code, msg, loc) => {
       if (seenMsg.has(msg)) return;
       seenMsg.add(msg);
-      messages.push({ uid, code, msg });
+      messages.push({ uid, code, msg, loc: loc || null });
     };
 
-    lay.sheets.forEach((si) => {
+    lay.sheets.forEach((si, sheetIdx) => {
       const def = App.sheetDef(si.sheetId) || si;
       const W = +def.width, H = +def.height;
       const ps = si.placements;
+      const dkey = App.defectKey(si.sheetId, si.instance);
+      const defects = App.defectsOn(si.sheetId, si.instance);
+
+      // 缺陷越界（超出板面）
+      defects.forEach((d) => {
+        const bb = Defects.bbox(d);
+        if (bb && (bb.x < -this.EPS || bb.y < -this.EPS || bb.x1 > W + this.EPS || bb.y1 > H + this.EPS)) {
+          say(null, 'defout', `${d.id}（${Defects.TYPES[d.type] || ''}）超出板材 ${si.sheetId} #${si.instance + 1} 板面`,
+              { type: 'defect', key: dkey, id: d.id, sheetIndex: sheetIdx });
+        }
+      });
 
       ps.forEach((p) => {
         const pd = App.uidPart(p.uid);
@@ -43,7 +61,8 @@ const Validate = {
         if (p.x < margin - this.EPS || p.y < margin - this.EPS ||
             p.x + p.w > W - margin + this.EPS || p.y + p.h > H - margin + this.EPS) {
           flag(p.uid, 'bounds');
-          say(p.uid, 'bounds', `${p.uid} 超出板材可用区域（四边需留 ${fmtNum(margin)}mm）`);
+          say(p.uid, 'bounds', `${p.uid} 超出板材可用区域（四边需留 ${fmtNum(margin)}mm）`,
+              { type: 'part', uid: p.uid, sheetIndex: sheetIdx });
         }
         if (!pd) {
           flag(p.uid, 'nodef');
@@ -75,6 +94,15 @@ const Validate = {
             flag(p.uid, 'size');
             say(p.uid, 'size', `${p.uid} 尺寸与零件定义（${pd.width}×${pd.height}）不符`);
           }
+          // 板面缺陷冲突（安全外扩/面别/等级/容许区）
+          const hit = Defects.blockingDefect(p, pd, defects);
+          if (hit) {
+            flag(p.uid, 'defect');
+            flagDefect(dkey, hit.id, p.uid);
+            say(p.uid, 'defect',
+              `${p.uid}（${pd.name}）侵入缺陷 ${Defects.label(hit)} 的避让范围（板材 ${si.sheetId} #${si.instance + 1}）`,
+              { type: 'partdefect', uid: p.uid, key: dkey, id: hit.id, sheetIndex: sheetIdx });
+          }
         }
       });
 
@@ -98,10 +126,10 @@ const Validate = {
         }
       }
     });
-    return { vmap, messages };
+    return { vmap, dmap, messages };
   },
 
-  /* 拖拽过程中的快速校验：候选位置是否合法（越界 / 间距 / 重叠 / 板材纹理） */
+  /* 拖拽过程中的快速校验：候选位置是否合法（越界 / 间距 / 重叠 / 板材纹理 / 缺陷） */
   checkPlacement(sheetIdx, uid, x, y, w, h) {
     const lay = App.layout();
     if (!lay || !lay.sheets[sheetIdx]) return false;
@@ -119,6 +147,9 @@ const Validate = {
       if (x < p.x + p.w + gap - this.EPS && p.x < x + w + gap - this.EPS &&
           y < p.y + p.h + gap - this.EPS && p.y < y + h + gap - this.EPS) return false;
     }
+    // 缺陷避让
+    if (pd && Defects.blockingDefect({ x, y, w, h, rotated: Math.abs(w - pd.width) > 0.01 },
+                                     pd, App.defectsOn(si.sheetId, si.instance))) return false;
     return true;
   },
 };

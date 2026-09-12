@@ -28,12 +28,12 @@ global.document = {
 global.renderAll = () => {};  // App.undo/redo 会调用，测试中无需真实渲染
 
 /* ---- 加载被测模块 ---- */
-const src = ['state.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js']
+const src = ['state.js', 'defects.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js']
   .map(f => fs.readFileSync(path.join(__dirname, '..', 'static', 'js', f), 'utf8'))
   .join('\n');
 eval(src + `
 global.App = App; global.Validate = Validate; global.Print = Print;
-global.CutPlan = CutPlan; global.CutUI = CutUI;
+global.CutPlan = CutPlan; global.CutUI = CutUI; global.Defects = Defects;
 global.recomputeLayoutStats = recomputeLayoutStats;
 global.guillotineCuts = guillotineCuts;
 `);
@@ -544,6 +544,153 @@ section('裁切工序：面板开合与画布高亮层');
     global.document = realDoc;
     delete global.Canvas;
   }
+}
+
+/* ================= 板面缺陷避让 ================= */
+section('缺陷：几何工具（点在多边形内 / 矩形-多边形距离 / 面别）');
+{
+  const sq = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
+  ok(Defects.pointInPoly(5, 5, sq), '点在正方形内');
+  ok(!Defects.pointInPoly(15, 5, sq), '点在正方形外');
+  near(Defects.rectPolyDist(20, 0, 5, 5, sq), 10, '矩形与多边形水平间隙 10');
+  near(Defects.rectPolyDist(5, -6, 5, 5, sq), 1, '矩形与多边形垂直间隙 1');
+  near(Defects.rectPolyDist(0, 0, 10, 10, sq), 0, '重叠距离为 0');
+  const tri = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 0, y: 20 }];
+  near(Defects.rectPolyDist(30, 30, 10, 10, tri), Math.hypot(20, 20), '矩形到三角形斜边距离');
+  // 面别相遇矩阵
+  ok(!Defects.faceConflict('front', 'any'), '正反面均可的零件不避让');
+  ok(Defects.faceConflict('both', 'front'), '双面缺陷 vs 正面要求 → 相遇');
+  ok(Defects.faceConflict('front', 'both'), '正面缺陷 vs 双面要求 → 相遇');
+  ok(!Defects.faceConflict('back', 'front'), '反面缺陷 vs 正面要求 → 不相遇');
+  ok(Defects.faceConflict('front', 'front'), '正面缺陷 vs 正面要求 → 相遇');
+  // 两点矩形展开四点
+  const d = { shape: 'rect', points: [{ x: 120, y: 160 }, { x: 60, y: 40 }], clearance: 0 };
+  eq(Defects.polyPoints(d).length, 4, '矩形两点存储展开为 4 点');
+  near(Defects.polyArea(Defects.polyPoints(d)), 60 * 120, '矩形核心面积');
+}
+
+function setupDefectLayout() {
+  App.settings = { kerf: 3, margin: 5, spacing: 2 };
+  App.sheets = [{ id: 'S1', name: '板', width: 1000, height: 500, grain: 'none', quantity: 1 }];
+  App.parts = [
+    { id: 'P1', name: '门板', width: 300, height: 200, quantity: 1, rotatable: true,
+      grain: 'none', faceReq: 'front', allowGrade: 0, allowZones: [] },
+    { id: 'P2', name: '背板', width: 300, height: 200, quantity: 1, rotatable: true,
+      grain: 'none', faceReq: 'back', allowGrade: 0, allowZones: [] },
+    { id: 'P3', name: '层板', width: 300, height: 200, quantity: 1, rotatable: true,
+      grain: 'none', faceReq: 'front', allowGrade: 1, allowZones: [] },
+  ];
+  App.defects = {
+    'S1#0': [{ id: 'D1', type: 'knot', grade: 3, face: 'front', clearance: 30, shape: 'rect',
+               points: [{ x: 100, y: 100 }, { x: 200, y: 200 }] }],
+  };
+  App.layouts = [{
+    id: 1, strategy: '测试',
+    sheets: [{ sheetId: 'S1', name: '板', instance: 0, width: 1000, height: 500, placements: [] }],
+    unplaced: [], stats: {},
+  }];
+  App.active = 0;
+  App.selected = null;
+  App.resetHistory();
+}
+
+section('缺陷：blockingDefect 安全外扩 / 等级 / 面别 / 容许区');
+{
+  setupDefectLayout();
+  const list = App.defects['S1#0'];
+  const p1 = App.partDef('P1');
+  // 核心(100,100)-(200,200)，外扩30：零件右边 x=100 时净距 0 < 30 → 冲突
+  ok(Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, p1, list), '净距 0 < 外扩30 → 冲突');
+  ok(!Defects.blockingDefect({ x: 0, y: 0, w: 60, h: 100 }, p1, list), '净距 40 ≥ 外扩30 → 不冲突');
+  // 反面要求的 P2：正面缺陷不相遇
+  ok(!Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, App.partDef('P2'), list), '面别不相遇 → 不冲突');
+  // P3 允许 1 级：3 级缺陷仍冲突
+  ok(Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, App.partDef('P3'), list), '3级 > 允许1级 → 冲突');
+  const p3b = { ...App.partDef('P3'), allowGrade: 3 };
+  ok(!Defects.blockingDefect({ x: 0, y: 0, w: 100, h: 100 }, p3b, list), '允许3级 → 等级容许');
+  // 容许区：缺陷整体在零件内部且落入容许区 → 豁免
+  const p1z = { ...p1, allowZones: [{ points: [
+    { x: 60, y: 60 }, { x: 260, y: 60 }, { x: 260, y: 260 }, { x: 60, y: 260 }] }] };
+  const placement = { x: 0, y: 0, w: 300, h: 200, rotated: false };
+  ok(!Defects.blockingDefect(placement, p1z, list), '缺陷整体落入容许区 → 豁免');
+  // 容许区只覆盖左 50mm：缺陷 x∈[100,200] 不在区内 → 仍冲突
+  const p1z2 = { ...p1, allowZones: [{ points: [
+    { x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 200 }, { x: 0, y: 200 }] }] };
+  ok(Defects.blockingDefect(placement, p1z2, list), '容许区未覆盖缺陷 → 仍冲突');
+  // 旋转零件容许区坐标映射（视觉顺时针）：局部容许区 (0,0)-(40,200)
+  const p1r = { ...p1, width: 300, height: 200, allowZones: [{ points: [
+    { x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 200 }, { x: 0, y: 200 }] }] };
+  const pr = { x: 0, y: 0, w: 200, h: 300, rotated: true };
+  const zt = Defects.transformZone(p1r.allowZones[0], pr, p1r);
+  // (lx,ly)→(x+ph-ly, y+lx)：ph=200 → 区域为 x∈[0,200], y∈[0,40]
+  ok(zt.every(q => q.x >= -1e-9 && q.x <= 200 + 1e-9 && q.y >= -1e-9 && q.y <= 40 + 1e-9),
+    '旋转后容许区映射到零件顶部条带');
+  // 避让碎料面积 > 0 且不超过可用区面积
+  const scrap = Defects.expandedArea(list[0], 5, 990, 490);
+  ok(scrap > 100 * 100 && scrap <= 990 * 490, '外扩碎料面积估算合理（实际 ' + Math.round(scrap) + '）');
+}
+
+section('缺陷：Validate 复核与受影响零件映射');
+{
+  setupDefectLayout();
+  const lay = App.layout();
+  // P1#1 压住缺陷（侵入安全区），P2#1 反面要求不冲突，P3#1 远离缺陷
+  lay.sheets[0].placements = [
+    { uid: 'P1#1', partId: 'P1', name: '门板', x: 60, y: 60, w: 300, h: 200, rotated: false, locked: false },
+    { uid: 'P2#1', partId: 'P2', name: '背板', x: 60, y: 60, w: 300, h: 200, rotated: false, locked: false },
+    { uid: 'P3#1', partId: 'P3', name: '层板', x: 600, y: 250, w: 300, h: 200, rotated: false, locked: false },
+  ];
+  const res = Validate.check();
+  ok(res.vmap.get('P1#1') && res.vmap.get('P1#1').has('defect'), 'P1#1 标记缺陷冲突');
+  ok(!res.vmap.get('P2#1') || !res.vmap.get('P2#1').has('defect'), 'P2#1（反面要求）不冲突');
+  ok(!res.vmap.get('P3#1') || !res.vmap.get('P3#1').has('defect'), 'P3#1 远离缺陷不冲突');
+  const affected = res.dmap.get('S1#0:D1');
+  ok(affected && affected.length === 1 && affected[0] === 'P1#1', '受影响零件映射到 D1 → P1#1');
+  ok(res.messages.some(m => m.code === 'defect' && m.loc && m.loc.id === 'D1' && m.loc.sheetIndex === 0),
+    '冲突提示携带板材/缺陷定位信息');
+  // 拖动复核 checkPlacement：侵入区非法、安全距离外合法
+  ok(!Validate.checkPlacement(0, 'P1#1', 60, 60, 300, 200), '拖入安全区 → 非法');
+  ok(Validate.checkPlacement(0, 'P1#1', 620, 40, 300, 200), '安全外扩且与其他零件间距满足 → 合法');
+
+  // 统计：合格 2、冲突 1、碎料 > 0
+  recomputeLayoutStats(lay);
+  eq(lay.stats.qualifiedCount, 2, '合格零件数 2');
+  eq(lay.stats.defectConflictCount, 1, '缺陷冲突数 1');
+  ok(lay.stats.defectScrap > 0, '避让碎料面积计入统计');
+
+  // 拖动缺陷后立即复核：把缺陷移到 P3#1 处 → P3 变为受影响件
+  App.defects['S1#0'][0].points = [{ x: 650, y: 280 }, { x: 750, y: 380 }];
+  const res2 = Validate.check();
+  ok(!res2.vmap.get('P1#1') || !res2.vmap.get('P1#1').has('defect'), '缺陷移走后 P1#1 解除冲突');
+  ok(res2.vmap.get('P3#1') && res2.vmap.get('P3#1').has('defect'), 'P3#1 立即被标为受影响');
+  // 撤销恢复缺陷位置（快照含 defects）
+  App.pushHistory();
+  App.undo();
+  eq(App.defects['S1#0'][0].points[0].x, 100, '撤销恢复缺陷位置');
+}
+
+section('缺陷：随项目数据序列化与打印图标注');
+{
+  setupDefectLayout();
+  // 打印 SVG 含缺陷编号、类型、避让距离与安全外扩多边形
+  App.violations = Validate.check();
+  const lay = App.layout();
+  const r = Print.sheetSvg(lay.sheets[0], 0, null);
+  ok(r.defects.length === 1, '打印数据携带缺陷列表');
+  ok(r.svg.includes('D1'), '打印图标注缺陷编号 D1');
+  ok(r.svg.includes('避让30mm'), '打印图标注避让距离');
+  ok(r.svg.includes('节疤'), '打印图标注缺陷类型');
+  ok(/stroke-dasharray/.test(r.svg), '打印图含安全边界虚线');
+  const html = Print.buildHtml(lay);
+  ok(html.includes('板面缺陷'), '打印页含板面缺陷章节');
+  ok(html.includes('合格零件'), '打印摘要含合格零件数');
+  // 容许区打印：给零件加容许区后图上出现蓝色虚线多边形
+  App.parts[0].allowZones = [{ points: [
+    { x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }] }];
+  lay.sheets[0].placements = [
+    { uid: 'P1#1', partId: 'P1', name: '门板', x: 5, y: 5, w: 300, h: 200, rotated: false, locked: false }];
+  const r2 = Print.sheetSvg(lay.sheets[0], 0, null);
+  ok(r2.svg.includes('#1565c0'), '容许区在打印图上以蓝色虚线标出');
 }
 
 /* ================= 结果 ================= */

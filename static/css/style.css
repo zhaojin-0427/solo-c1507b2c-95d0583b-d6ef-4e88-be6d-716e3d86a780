@@ -144,6 +144,14 @@ input:focus, select:focus { outline: 2px solid #90caf9; }
 .part-dim { fill: #607d8b; text-anchor: middle; pointer-events: none; }
 .part-tag { pointer-events: none; font-size: 22px; }
 .part-grain { stroke: rgba(84,110,122,.55); stroke-width: 1.2; pointer-events: none; }
+.part-allowzone {
+  fill: rgba(21,101,192,.16); stroke: #1565c0; stroke-width: 1.4;
+  stroke-dasharray: 7 4; pointer-events: none;
+}
+.part-face-tag {
+  fill: #1565c0; font-weight: 700; pointer-events: none;
+  paint-order: stroke; stroke: rgba(255,255,255,.8); stroke-width: 2px;
+}
 
 .part.v-overlap .part-rect, .part.v-bounds .part-rect { stroke: var(--danger); stroke-width: 4; }
 .part.v-overlap .part-rect, .part.v-bounds .part-rect { fill-opacity: .55; }
@@ -152,6 +160,81 @@ input:focus, select:focus { outline: 2px solid #90caf9; }
   stroke: #8e24aa; stroke-width: 3.5; stroke-dasharray: 10 5;
 }
 .part.drag-invalid .part-rect { stroke: var(--danger); stroke-width: 5; }
+
+/* ---- 板面缺陷 ---- */
+.defect { cursor: pointer; }
+.defect-core { fill-opacity: .28; stroke-width: 2; }
+.defect-buffer {
+  fill: none; stroke-width: 1.6; stroke-dasharray: 9 6;
+  fill-opacity: 0; opacity: .8;
+}
+.defect.selected .defect-core { stroke-width: 4; fill-opacity: .4; }
+.defect.selected .defect-buffer { stroke-width: 3; opacity: 1; }
+.defect-tag {
+  fill: #fff; text-anchor: middle; font-weight: 700; pointer-events: none;
+  paint-order: stroke; stroke: rgba(0,0,0,.55); stroke-width: 3px;
+}
+.defect-sub { fill: #b71c1c; font-weight: 600; pointer-events: none; }
+.defect-affect {
+  fill: none; stroke: var(--danger); stroke-width: 4;
+  stroke-dasharray: 6 4; animation: cutdash 1.2s linear infinite; pointer-events: none;
+}
+.defect-handle { fill: #fff; stroke: var(--danger); stroke-width: 2; cursor: nwse-resize; }
+.defect-del-v circle { fill: var(--danger); cursor: pointer; }
+.defect-del-v text { fill: #fff; pointer-events: none; }
+.defect-draft { fill: rgba(198,40,40,.12); stroke: var(--danger); stroke-width: 2; stroke-dasharray: 7 5; pointer-events: none; }
+.defect-draft-v { fill: var(--danger); pointer-events: none; }
+.defect.out-of-sheet .defect-core { stroke: #000; stroke-dasharray: 4 3; }
+
+.part.v-defect .part-rect {
+  stroke: var(--danger); stroke-width: 4; stroke-dasharray: 12 5 3 5;
+  fill-opacity: .45;
+}
+
+/* 缺陷工具与清单 */
+.defect-tools { display: flex; gap: 6px; margin-bottom: 6px; }
+.defect-tools button { flex: 1; font-size: 12px; }
+.defect-tools button.active { background: var(--danger); color: #fff; border-color: var(--danger); }
+.badge.brown { background: #6d4c41; }
+.msg-list li.defect-msg { background: #efebe9; border-left-color: #6d4c41; }
+.msg-list li.defect-li { background: #f6f1ea; border-left-color: #6d4c41; cursor: pointer; }
+.msg-list li.type-crack { border-left-color: var(--danger); }
+.msg-list li.type-scratch { border-left-color: var(--warn); }
+.msg-list li .bad { color: var(--danger); font-weight: 600; }
+.conflict-chip {
+  display: block; margin-top: 3px; width: 100%; text-align: left;
+  font-size: 11px; background: #ffebee; border: 1px solid #ef9a9a;
+  border-radius: 4px; padding: 2px 6px; color: #b71c1c; cursor: pointer;
+}
+.conflict-chip:hover { background: #ffcdd2; }
+#canvas.defect-mode { cursor: crosshair; }
+.danger-btn { background: var(--danger); color: #fff; border-color: var(--danger); }
+.danger-btn:hover { background: #d32f2f; }
+.bad-hint { color: var(--danger); }
+.bad-hint a { color: var(--primary); cursor: pointer; text-decoration: underline; margin: 0 3px; }
+.mini-btn { padding: 1px 8px; font-size: 11px; }
+.tol-btn { font-size: 10px; padding: 1px 5px; white-space: nowrap; color: #5d4037; }
+
+/* ---- 零件容缺设置模态框 ---- */
+.modal.wide { width: 720px; }
+.tol-grid { display: flex; gap: 14px; }
+.tol-fields { flex: 0 0 300px; display: flex; flex-direction: column; gap: 8px; }
+.tol-fields label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.tol-canvas-wrap { flex: 1 1 auto; border: 1px solid var(--border); border-radius: 6px; background: #fafafa; min-height: 320px; }
+#tol-svg { width: 100%; height: 100%; }
+.tol-part { fill: #fff8e1; stroke: #8d6e63; stroke-width: 2; }
+.tol-face-tag { font-size: 16px; fill: #5d4037; font-weight: 600; pointer-events: none; }
+.tol-dim-tag { font-size: 13px; fill: #8d6e63; pointer-events: none; }
+.tol-zone { fill: rgba(21,101,192,.22); stroke: var(--primary); stroke-width: 2; stroke-dasharray: 8 4; pointer-events: none; }
+.tol-zone-tag { font-size: 15px; fill: var(--primary); font-weight: 700; pointer-events: none; }
+.tol-draft { fill: none; stroke: var(--danger); stroke-width: 2; stroke-dasharray: 6 4; pointer-events: none; }
+.tol-draft-v { fill: var(--danger); pointer-events: none; }
+.tol-tools { display: flex; gap: 6px; }
+.tol-zone-row {
+  font-size: 12px; background: #eceff1; border-radius: 4px; padding: 3px 8px;
+  margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;
+}
+.tol-del-z { font-size: 11px; padding: 0 8px; color: var(--danger); }
 
 /* ---- 右侧列表 ---- */
 .msg-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }

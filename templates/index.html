@@ -61,7 +61,7 @@
       <section class="panel">
         <h2>零件</h2>
         <table class="def-table" id="parts-table">
-          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>可旋转</th><th>纹理</th><th></th></tr></thead>
+          <thead><tr><th>名称</th><th>宽</th><th>高</th><th>数量</th><th>可旋转</th><th>纹理</th><th>正反面/容缺</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="add-row">
@@ -99,9 +99,9 @@
           <span class="sep"></span>
           <button id="tb-rotate" title="旋转选中零件 (R)">⟳</button>
           <button id="tb-lock" title="锁定/解锁选中零件 (L)">🔒</button>
-          <button id="tb-delete" title="从板材移除选中零件 (Del)">✕</button>
+          <button id="tb-delete" title="移除选中零件 / 删除选中缺陷 (Del)">✕</button>
         </div>
-        <div id="canvas-hint">滚轮缩放 · 拖动空白处平移 · 拖动零件移动（可跨板）· R 旋转 · L 锁定 · Del 移除 · 🪓 裁切工序可逐刀演练</div>
+        <div id="canvas-hint">滚轮缩放 · 拖动空白平移 · 拖零件移动（可跨板）· R 旋转 · L 锁定 · Del 移除 · 缺陷可绘制/拖动/拉顶点调整</div>
       </div>
       <!-- 底部：裁切工序演练面板 -->
       <div id="cutpanel" class="hidden">
@@ -141,8 +141,18 @@
     <!-- 右侧：选中项 / 违规 / 未放置 -->
     <aside id="rightbar">
       <section class="panel" id="selection-panel">
-        <h2>选中零件</h2>
-        <div class="panel-body" id="selection-body"><p class="hint">点击画布中的零件进行选择</p></div>
+        <h2>选中项（零件 / 缺陷）</h2>
+        <div class="panel-body" id="selection-body"><p class="hint">点击画布中的零件或缺陷进行选择</p></div>
+      </section>
+      <section class="panel" id="defects-panel">
+        <h2>板面缺陷 <span id="defect-count" class="badge brown"></span></h2>
+        <div class="defect-tools">
+          <button id="btn-d-rect">▭ 矩形缺陷</button>
+          <button id="btn-d-poly">⬠ 多边形缺陷</button>
+        </div>
+        <ul id="defects-list" class="msg-list"><li class="ok">尚无板面缺陷</li></ul>
+        <p class="hint">缺陷按板材实例登记（节疤/裂纹/划痕 · 等级 · 影响面 · 安全外扩），随项目保存；
+          生成排样时自动避让，右侧提示可点击定位。</p>
       </section>
       <section class="panel" id="violations-panel">
         <h2>违规检查 <span id="violation-count" class="badge"></span></h2>
@@ -161,8 +171,10 @@
 
   <script src="/static/js/state.js"></script>
   <script src="/static/js/api.js"></script>
+  <script src="/static/js/defects.js"></script>
   <script src="/static/js/validate.js"></script>
   <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/parttol.js"></script>
   <script src="/static/js/cutplan.js"></script>
   <script src="/static/js/cutui.js"></script>
   <script src="/static/js/ui.js"></script>

@@ -56,6 +56,25 @@ const Print = {
     s += this.dimLine(0, -pad * 0.45, W, -pad * 0.45, `${fmtNum(W)}`, fs, 'h');
     s += this.dimLine(-pad * 0.45, 0, -pad * 0.45, H, `${fmtNum(H)}`, fs, 'v');
 
+    // 板面缺陷：安全外扩边界（虚线）+ 核心轮廓 + 编号 + 外扩标注
+    const defects = App.defectsOn(si.sheetId, si.instance);
+    defects.forEach((d) => {
+      const color = { knot: '#6d4c41', crack: '#c62828', scratch: '#ef6c00' }[d.type] || '#6d4c41';
+      const core = Defects.polyPoints(d);
+      const buf = Defects.bufferOutline(d);
+      const cpa = pts => pts.map(q => `${fmtNum(q.x)},${fmtNum(q.y)}`).join(' ');
+      if (buf.length >= 3 && +d.clearance > 0) {
+        s += `<polygon points="${cpa(buf)}" fill="none" stroke="${color}" stroke-width="${fs * 0.08}" stroke-dasharray="${fs * 0.45} ${fs * 0.28}"/>`;
+      }
+      s += `<polygon points="${cpa(core)}" fill="${color}" fill-opacity="0.3" stroke="${color}" stroke-width="${fs * 0.12}"/>`;
+      const bb = Defects.bbox(d);
+      const cx = (bb.x + bb.x1) / 2, cy = (bb.y + bb.y1) / 2;
+      s += `<circle cx="${cx}" cy="${cy}" r="${fs * 0.62}" fill="${color}"/>` +
+           `<text x="${cx}" y="${cy + fs * 0.26}" font-size="${fs * 0.72}" fill="#fff" text-anchor="middle" font-weight="bold">${esc(d.id)}</text>`;
+      s += `<text x="${bb.x}" y="${Math.max(fs, bb.y - fs * 0.2)}" font-size="${fs * 0.5}" fill="${color}" font-weight="bold">` +
+           `${esc(d.id)} ${esc(Defects.TYPES[d.type] || d.type)} ${d.grade}级 ${esc(Defects.FACES[d.face] || '')} 避让${fmtNum(d.clearance)}mm</text>`;
+    });
+
     // 阻塞区域（人工处理）：红色斜线框
     (plan ? plan.blocked : []).forEach((b) => {
       s += `<rect x="${b.board.x}" y="${b.board.y}" width="${b.board.w}" height="${b.board.h}" fill="#c62828" fill-opacity="0.08" stroke="#c62828" stroke-width="${fs * 0.1}" stroke-dasharray="${fs * 0.4} ${fs * 0.25}"/>`;
@@ -77,6 +96,15 @@ const Print = {
     // 零件
     parts.forEach((p) => {
       s += `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" fill="${colorFor(p.partId)}" fill-opacity="0.55" stroke="#333" stroke-width="${fs * 0.08}"/>`;
+      // 零件容缺容许区（蓝色虚线）
+      const pd = App.uidPart(p.uid);
+      if (pd && (pd.allowZones || []).length) {
+        pd.allowZones.forEach((z) => {
+          const zt = Defects.transformZone(z, p, pd);
+          const pts = zt.map(q => `${fmtNum(q.x)},${fmtNum(q.y)}`).join(' ');
+          s += `<polygon points="${pts}" fill="#1565c0" fill-opacity="0.12" stroke="#1565c0" stroke-width="${fs * 0.06}" stroke-dasharray="${fs * 0.3} ${fs * 0.2}"/>`;
+        });
+      }
       // 编号圆
       s += `<circle cx="${p.x + fs * 0.7}" cy="${p.y + fs * 0.7}" r="${fs * 0.5}" fill="#333"/>` +
            `<text x="${p.x + fs * 0.7}" y="${p.y + fs * 0.92}" font-size="${fs * 0.6}" fill="#fff" text-anchor="middle">${p.no}</text>`;
@@ -88,7 +116,7 @@ const Print = {
     });
 
     return { svg: `<svg viewBox="${-pad} ${-pad} ${W + pad * 2} ${H + pad * 2}" xmlns="http://www.w3.org/2000/svg">${s}</svg>`,
-             parts, steps, def, W, H };
+             parts, steps, def, W, H, defects };
   },
 
   dimLine(x1, y1, x2, y2, text, fs, dir) {
@@ -123,10 +151,15 @@ const Print = {
         totReuse += s.reusableArea; totManual += s.manualCount;
       });
     }
+    let totalDefects = 0;
+    lay.sheets.forEach(si => { totalDefects += App.defectsOn(si.sheetId, si.instance).length; });
     let body = `
       <h1>${name} — 裁切排样图</h1>
       <p class="meta">生成时间：${now} · 锯缝 ${fmtNum(sett.kerf)}mm · 板边留量 ${fmtNum(sett.margin)}mm · 零件间距 ${fmtNum(sett.spacing)}mm</p>
-      <p class="meta">利用率 ${fmtPct(st.utilization)} · 废料 ${fmtArea(st.waste)} · 约 ${st.cuts} 刀（估算）· 用板 ${st.usedSheets}/${st.totalSheets} 张 · 已放置 ${st.placedCount} 件 / 未放置 ${st.unplacedCount} 件</p>`;
+      <p class="meta">合格零件 <b>${st.qualifiedCount != null ? st.qualifiedCount : st.placedCount}</b> / 已放置 ${st.placedCount} 件 / 未放置 ${st.unplacedCount} 件 · 用板 ${st.usedSheets}/${st.totalSheets} 张 · 利用率 ${fmtPct(st.utilization)} · 避让碎料 ${fmtArea(st.defectScrap || 0)} · 约 ${st.cuts} 刀（估算）</p>`;
+    if (totalDefects) {
+      body += `<p class="meta">板面缺陷共 ${totalDefects} 处（彩色填充为缺陷核心轮廓，同色虚线为安全外扩边界，圆圈内为缺陷编号）</p>`;
+    }
     if (cutData) {
       body += `
       <p class="meta">裁切工序：共 ${totCuts} 刀 · 翻板 ${totFlips} 次 · 可复用余料 ${fmtArea(totReuse)}${totManual ? ` · <b style="color:#c62828">人工处理 ${totManual} 项</b>` : ''}</p>`;
@@ -146,6 +179,22 @@ const Print = {
         `<tr><td>${p.no}</td><td>${esc(p.uid)}</td><td>${esc(p.name || p.partId)}</td>` +
         `<td>${fmtNum(p.w)} × ${fmtNum(p.h)}</td><td>(${fmtNum(p.x)}, ${fmtNum(p.y)})</td>` +
         `<td>${p.rotated ? '已旋转 90°' : '未旋转'}</td></tr>`).join('');
+      let defectHtml = '';
+      if (r.defects.length) {
+        const drows = r.defects.map((d) => {
+          const bb = Defects.bbox(d);
+          const affected = (App.violations && App.violations.dmap
+            && App.violations.dmap.get(App.defectKey(si.sheetId, si.instance) + ':' + d.id)) || [];
+          return `<tr><td><b>${esc(d.id)}</b></td><td>${esc(Defects.TYPES[d.type] || d.type)}</td>` +
+            `<td>${d.grade} 级</td><td>${esc(Defects.FACES[d.face] || d.face)}</td>` +
+            `<td>${fmtNum(d.clearance)} mm</td>` +
+            `<td>(${fmtNum(bb.x)}, ${fmtNum(bb.y)})–(${fmtNum(bb.x1)}, ${fmtNum(bb.y1)})</td>` +
+            `<td>${affected.length ? esc(affected.join('、')) : '—'}</td></tr>`;
+        }).join('');
+        defectHtml = `
+          <h3>板面缺陷（图中同色虚线为安全外扩边界）</h3>
+          <table><thead><tr><th>编号</th><th>类型</th><th>等级</th><th>影响面</th><th>避让距离</th><th>范围 (mm)</th><th>受影响零件</th></tr></thead><tbody>${drows}</tbody></table>`;
+      }
       let manualHtml = '';
       if (plan && plan.manual.length) {
         const rows = plan.manual.map(mn =>
@@ -158,6 +207,7 @@ const Print = {
         <section class="sheet-page">
           <h2>板材 #${idx + 1}：${esc(si.sheetId)} ${esc(si.name || '')}（${fmtNum(r.W)}×${fmtNum(r.H)} mm，${si.placements.length} 件）</h2>
           ${r.svg}
+          ${defectHtml}
           <h3>裁切工序（切割顺序，图中蓝色编号即顺序）</h3>
           <table><thead><tr><th>顺序</th><th>类型</th><th>切线位置 (mm)</th><th>切前子板 (mm)</th><th>行程 (mm)</th><th>产出</th></tr></thead><tbody>${cutRows || '<tr><td colspan="6">—</td></tr>'}</tbody></table>
           ${manualHtml}

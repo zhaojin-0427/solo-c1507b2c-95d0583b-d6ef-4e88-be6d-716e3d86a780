@@ -17,6 +17,15 @@ const Canvas = {
       this.zoomAt(e.clientX, e.clientY, e.deltaY > 0 ? 1.15 : 1 / 1.15);
     }, { passive: false });
     this.svg.addEventListener('contextmenu', (e) => e.preventDefault());
+    this.svg.addEventListener('dblclick', (e) => {
+      if (!App.defectMode || App.defectMode !== 'poly') return;
+      const wpt = this.screenToWorld(e.clientX, e.clientY);
+      const tIdx = this.sheetAt(wpt.x, wpt.y);
+      if (tIdx < 0) return;
+      const off = this.sheetOffsets[tIdx];
+      if (typeof Defects !== 'undefined' &&
+          Defects.onDoubleClick({ x: wpt.x - off.x, y: wpt.y - off.y })) e.preventDefault();
+    });
     this.applyView();
   },
 
@@ -133,6 +142,8 @@ const Canvas = {
     sub.textContent = `${fmtNum(off.w)}×${fmtNum(off.h)} mm · ${si.placements.length} 件 · 利用率 ${fmtPct(util)}`;
 
     si.placements.forEach((p) => this.renderPart(g, p));
+    // 板面缺陷（核心区 + 安全外扩边界 + 编号）覆盖在零件之上
+    if (typeof Defects !== 'undefined') Defects.renderInto(g, si, idx);
   },
 
   partClass(p) {
@@ -141,7 +152,7 @@ const Canvas = {
     if (p.locked) cls += ' locked';
     const v = App.violations.vmap.get(p.uid);
     if (v) {
-      for (const code of ['overlap', 'bounds', 'spacing', 'grain', 'nodef', 'size']) {
+      for (const code of ['overlap', 'bounds', 'spacing', 'grain', 'nodef', 'size', 'defect']) {
         if (v.has(code)) { cls += ' v-' + code; break; }
       }
     }
@@ -186,6 +197,23 @@ const Canvas = {
       const t = this.el('text', { class: 'part-tag', x: 6, y: 24, 'font-size': 20 }, g);
       t.textContent = '🔒';
     }
+    // 容缺示意：容许区（蓝色虚线）与正反面要求角标
+    if (pd) {
+      (pd.allowZones || []).forEach((z) => {
+        const zt = Defects.transformZone(z, p, pd);
+        if (zt.length >= 3) {
+          this.el('polygon', {
+            class: 'part-allowzone',
+            points: zt.map(q => `${q.x},${q.y}`).join(' '),
+          }, g);
+        }
+      });
+      const faceTag = { any: '', front: '正', back: '反', both: '双' }[pd.faceReq || 'any'];
+      if (faceTag && minSide >= 30) {
+        const t = this.el('text', { class: 'part-face-tag', x: 6, y: p.h - 8, 'font-size': 18 }, g);
+        t.textContent = faceTag + (+pd.allowGrade ? `·容${pd.allowGrade}级` : '');
+      }
+    }
     return g;
   },
 
@@ -193,8 +221,23 @@ const Canvas = {
   onPointerDown(e) {
     if (e.button !== 0 && e.button !== 1) return;
     const partG = e.target.closest && e.target.closest('g.part');
+    const defectG = e.target.closest && e.target.closest('g.defect');
 
     if (App.placeMode && e.button === 0) { this.placeAt(e); return; }
+
+    // 缺陷系统优先：绘制模式下全部拦截；非绘制模式下点到缺陷（含手柄）则选中/拖动
+    if (e.button === 0 && typeof Defects !== 'undefined') {
+      const wpt0 = this.screenToWorld(e.clientX, e.clientY);
+      const sIdx = this.sheetAt(wpt0.x, wpt0.y);
+      if (sIdx >= 0) {
+        const lay = App.layout();
+        const off = this.sheetOffsets[sIdx];
+        const local = { x: wpt0.x - off.x, y: wpt0.y - off.y };
+        if (App.defectMode || defectG || (e.target.classList && e.target.classList.contains('defect-handle'))) {
+          if (Defects.onPointerDown(e, sIdx, local, defectG)) return;
+        }
+      }
+    }
 
     if (partG && e.button === 0) {
       const uid = partG.getAttribute('data-uid');
@@ -224,6 +267,18 @@ const Canvas = {
     const wpt = this.screenToWorld(e.clientX, e.clientY);
     const posEl = document.getElementById('st-pos');
     if (posEl) posEl.textContent = `光标 (${Math.round(wpt.x)}, ${Math.round(wpt.y)}) mm`;
+
+    // 缺陷拖动 / 绘制中的预览（局部坐标）
+    if (typeof Defects !== 'undefined' && Defects.drag) {
+      const tIdx = this.sheetAt(wpt.x, wpt.y);
+      if (tIdx >= 0) {
+        const off = this.sheetOffsets[tIdx];
+        Defects._lastClientX = e.clientX;
+        Defects._lastClientY = e.clientY;
+        Defects._curSheetIdx = tIdx;
+        if (Defects.onPointerMove({ x: wpt.x - off.x, y: wpt.y - off.y })) return;
+      }
+    }
 
     if (this.pan) {
       const r = this.svg.getBoundingClientRect();
@@ -264,6 +319,10 @@ const Canvas = {
   },
 
   onPointerUp() {
+    if (typeof Defects !== 'undefined' && Defects.drag) {
+      Defects.onPointerUp();
+      return;
+    }
     if (this.pan) { this.pan = null; return; }
     const d = this.drag;
     if (!d) return;

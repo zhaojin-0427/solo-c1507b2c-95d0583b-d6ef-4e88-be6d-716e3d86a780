@@ -2,14 +2,17 @@
 window.App = {
   settings: { kerf: 3, margin: 5, spacing: 2 },
   sheets: [],        // 原料板定义 [{id,name,width,height,grain,quantity}]
-  parts: [],         // 零件定义 [{id,name,width,height,quantity,rotatable,grain}]
+  parts: [],         // 零件定义 [{id,name,width,height,quantity,rotatable,grain,faceReq,allowGrade,allowZones}]
+  defects: {},       // 板面缺陷（随板材实例）：{ 'S1#0': [{id,type,grade,face,clearance,shape,points:[{x,y}]}] }
   layouts: [],       // 服务端返回的多个方案
   active: 0,         // 当前方案下标
   selected: null,    // 选中零件 uid
+  selectedDefect: null,  // 选中缺陷 {key, id}
+  defectMode: null,  // 缺陷绘制模式：'rect' | 'poly' | null
   placeMode: null,   // 待手动放置的未放置零件 uid
   history: [],
   hIndex: -1,
-  violations: { vmap: new Map(), messages: [] },
+  violations: { vmap: new Map(), dmap: new Map(), messages: [] },
   projectId: null,
   view: { x: -100, y: -120, w: 2800, h: 1800 },  // 画布视口（世界坐标=毫米）
   cutOpen: false,      // 裁切工序演练面板开关
@@ -24,6 +27,16 @@ App.partDef = function (partId) { return App.parts.find(p => p.id === partId) ||
 App.sheetDef = function (sheetId) { return App.sheets.find(s => s.id === sheetId) || null; };
 App.uidPart = function (uid) { return App.partDef(String(uid).split('#')[0]); };
 
+/* 板材实例缺陷 */
+App.defectKey = function (sheetId, instance) { return `${sheetId}#${instance}`; };
+App.defectsOn = function (sheetId, instance) {
+  return App.defects[App.defectKey(sheetId, instance)] || [];
+};
+App.findDefect = function (key, id) {
+  const list = App.defects[key] || [];
+  return { list, defect: list.find(d => d.id === id) || null };
+};
+
 App.findPlacement = function (uid) {
   const lay = App.layout();
   if (!lay) return null;
@@ -36,15 +49,22 @@ App.findPlacement = function (uid) {
 
 /* ---- 撤销 / 重做（快照式） ----
    约定：pushHistory() 在每次变更【之后】调用，压入变更后的新状态，
-   保证 history[hIndex] 始终等于当前状态，撤销/重做逐步移动指针。 */
+   保证 history[hIndex] 始终等于当前状态，撤销/重做逐步移动指针。
+   快照含 layouts（零件放置）与 defects（板面缺陷）两类可编辑几何。 */
 App.snapshot = function () {
-  return JSON.stringify({ layouts: App.layouts, active: App.active });
+  return JSON.stringify({
+    layouts: App.layouts, active: App.active,
+    defects: App.defects, parts: App.parts,
+  });
 };
 App.restore = function (snap) {
   const o = JSON.parse(snap);
   App.layouts = o.layouts;
   App.active = Math.min(o.active, o.layouts.length - 1);
   if (App.active < 0) App.active = 0;
+  App.defects = o.defects || {};
+  if (o.parts) App.parts = o.parts;   // 容许区编辑也入栈
+  App.selectedDefect = null;
 };
 App.pushHistory = function () {
   App.history = App.history.slice(0, App.hIndex + 1);  // 丢弃重做分支
@@ -133,12 +153,26 @@ function recomputeLayoutStats(lay) {
   const EPS = 1e-6;
   const m = +App.settings.margin || 0;
   let placedCount = 0, placedArea = 0, usedSheets = 0, usedArea = 0, cuts = 0;
+  let qualified = 0, conflicts = 0, scrap = 0;
   lay.sheets.forEach((si) => {
     const def = App.sheetDef(si.sheetId) || si;
     const W = +def.width, H = +def.height;
     const ps = si.placements;
     placedCount += ps.length;
     ps.forEach(p => { placedArea += p.w * p.h; });
+    // 板面缺陷：合格性复核 + 避让碎料面积（与后端同口径估算）
+    const defects = (typeof Defects !== 'undefined')
+      ? App.defectsOn(si.sheetId, si.instance) : [];
+    defects.forEach(d => {
+      scrap += Defects.expandedArea(d, m, W - 2 * m, H - 2 * m);
+    });
+    ps.forEach((p) => {
+      const pd = App.uidPart(p.uid);
+      if (pd) {
+        const hit = Defects.blockingDefect(p, pd, defects);
+        if (hit) conflicts++; else qualified++;
+      }
+    });
     if (!ps.length) return;
     usedSheets++;
     usedArea += W * H;
@@ -159,4 +193,7 @@ function recomputeLayoutStats(lay) {
   lay.stats.utilization = usedArea ? placedArea / usedArea : 0;
   lay.stats.waste = usedArea - placedArea;
   lay.stats.cuts = cuts;
+  lay.stats.qualifiedCount = qualified;
+  lay.stats.defectConflictCount = conflicts;
+  lay.stats.defectScrap = scrap;
 }

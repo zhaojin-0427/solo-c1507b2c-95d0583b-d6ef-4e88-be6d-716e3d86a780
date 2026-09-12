@@ -7,6 +7,7 @@ const Main = {
     this.bindTopbar();
     this.bindSettings();
     this.bindDefForms();
+    this.bindDefectTools();
     this.bindActions();
     this.bindKeyboard();
     this.loadSample();
@@ -23,14 +24,18 @@ const Main = {
       { id: 'S1', name: '多层板', width: 2440, height: 1220, grain: 'horizontal', quantity: 2 },
     ];
     App.parts = [
-      { id: 'P1', name: '侧板', width: 600, height: 400, quantity: 4, rotatable: true, grain: 'none' },
-      { id: 'P2', name: '层板', width: 560, height: 300, quantity: 6, rotatable: true, grain: 'none' },
-      { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: false, grain: 'horizontal' },
-      { id: 'P4', name: '背板', width: 580, height: 380, quantity: 2, rotatable: true, grain: 'none' },
+      { id: 'P1', name: '侧板', width: 600, height: 400, quantity: 4, rotatable: true, grain: 'none', faceReq: 'front', allowGrade: 1, allowZones: [] },
+      { id: 'P2', name: '层板', width: 560, height: 300, quantity: 6, rotatable: true, grain: 'none', faceReq: 'any', allowGrade: 2, allowZones: [] },
+      { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: false, grain: 'horizontal', faceReq: 'both', allowGrade: 0, allowZones: [] },
+      { id: 'P4', name: '背板', width: 580, height: 380, quantity: 2, rotatable: true, grain: 'none', faceReq: 'back', allowGrade: 0,
+        allowZones: [{ points: [{ x: 0, y: 300 }, { x: 200, y: 300 }, { x: 200, y: 380 }, { x: 0, y: 380 }] }] },
     ];
+    App.defects = {};
     App.layouts = [];
     App.active = 0;
     App.selected = null;
+    App.selectedDefect = null;
+    App.defectMode = null;
     App.projectId = null;
     this.syncSettingsInputs();
   },
@@ -51,9 +56,12 @@ const Main = {
       if (!confirm('新建项目将清空当前数据，确定？')) return;
       App.sheets = [{ id: 'S1', name: '原料板', width: 2440, height: 1220, grain: 'none', quantity: 1 }];
       App.parts = [];
+      App.defects = {};
       App.layouts = [];
       App.active = 0;
       App.selected = null;
+      App.selectedDefect = null;
+      App.defectMode = null;
       App.projectId = null;
       document.getElementById('project-name').value = '未命名项目';
       UI.renderSheetsTable();
@@ -111,6 +119,7 @@ const Main = {
         quantity: Math.max(1, +g('pt-qty') || 1),
         rotatable: g('pt-rot') === '1',
         grain: g('pt-grain'),
+        faceReq: 'any', allowGrade: 0, allowZones: [],
       });
       UI.renderPartsTable();
       this.onStructureChanged(false);
@@ -127,6 +136,31 @@ const Main = {
       if (notify) toast('定义已修改，排样结果已清空，请重新生成');
     }
     renderAll();
+  },
+
+  /* 无排样结果时构造空布局（仅板材实例），用于先登记板面缺陷再排样 */
+  ensureEmptyLayout() {
+    if (App.layout() || !App.sheets.length) return false;
+    const sheets = [];
+    App.sheets.forEach((s) => {
+      const qty = Math.max(1, +s.quantity || 1);
+      for (let i = 0; i < qty; i++) {
+        sheets.push({
+          sheetId: s.id, name: s.name, instance: i,
+          width: +s.width, height: +s.height, placements: [],
+        });
+      }
+    });
+    App.layouts = [{ id: 1, strategy: '待排样', sheets, unplaced: [], stats: {}, empty: true }];
+    App.active = 0;
+    App.resetHistory();
+    return true;
+  },
+
+  /* ---- 板面缺陷工具 ---- */
+  bindDefectTools() {
+    document.getElementById('btn-d-rect').addEventListener('click', () => Defects.setMode('rect'));
+    document.getElementById('btn-d-poly').addEventListener('click', () => Defects.setMode('poly'));
   },
 
   /* ---- 操作按钮 ---- */
@@ -173,6 +207,13 @@ const Main = {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); App.undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); App.redo(); return; }
       if (e.key === 'Escape') {
+        if (App.defectMode || Defects.drag || Defects._draft) {
+          App.defectMode = null;
+          Defects.cancelDraft();
+          Canvas.svg.classList.remove('defect-mode');
+          renderAll();
+          return;
+        }
         App.placeMode = null;
         App.selected = null;
         Canvas.svg.classList.remove('place-mode');
@@ -180,7 +221,10 @@ const Main = {
         return;
       }
       if (e.key === ' ' && App.cutOpen) { e.preventDefault(); CutUI.play(); return; }
-      if (e.key === 'Delete' || e.key === 'Backspace') { this.deleteSelected(); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (App.selectedDefect) { Defects.deleteSelected(); return; }
+        this.deleteSelected(); return;
+      }
       if (e.key === 'r' || e.key === 'R') { this.rotateSelected(); return; }
       if (e.key === 'l' || e.key === 'L') { this.toggleLock(); return; }
       // 方向键微调
@@ -225,6 +269,10 @@ const Main = {
   },
 
   deleteSelected() {
+    if (App.selectedDefect && typeof Defects !== 'undefined') {
+      Defects.deleteSelected();
+      return;
+    }
     const uid = App.selected;
     const found = uid && App.findPlacement(uid);
     if (!found) return;
@@ -241,10 +289,12 @@ const Main = {
   async runNest(keepLocked) {
     if (!App.sheets.length) { toast('请先定义至少一张原料板'); return; }
     if (!App.parts.length) { toast('请先定义至少一个零件'); return; }
+    if (App.layout() && App.layout().empty) { App.layouts = []; App.active = 0; }
     const payload = {
       settings: App.settings,
       sheets: App.sheets,
       parts: App.parts,
+      defects: App.defects,
       maxLayouts: 3,
     };
     if (keepLocked) {
@@ -287,12 +337,15 @@ const Main = {
   /* ---- 项目存取 ---- */
   async saveProject() {
     const name = document.getElementById('project-name').value.trim() || '未命名项目';
+    // 临时空布局（仅用于先登记缺陷）不随项目保存
+    const layouts = App.layouts.filter(l => !l.empty);
     const data = {
       settings: App.settings,
       sheets: App.sheets,
       parts: App.parts,
-      layouts: App.layouts,
-      active: App.active,
+      defects: App.defects,
+      layouts,
+      active: Math.min(App.active, Math.max(0, layouts.length - 1)),
       cutplan: App.cutplan,        // 裁切工序状态（切法覆盖/步骤顺序/进度）随项目保存
       cutStates: App._cutStates,
       cutOpen: App.cutOpen,
@@ -310,10 +363,14 @@ const Main = {
     const d = proj.data || {};
     App.settings = Object.assign({ kerf: 3, margin: 5, spacing: 0 }, d.settings);
     App.sheets = d.sheets || [];
-    App.parts = d.parts || [];
+    App.parts = (d.parts || []).map(p => Object.assign(
+      { faceReq: 'any', allowGrade: 0, allowZones: [] }, p));
+    App.defects = d.defects || {};
     App.layouts = d.layouts || [];
     App.active = Math.min(d.active || 0, Math.max(0, App.layouts.length - 1));
     App.selected = null;
+    App.selectedDefect = null;
+    App.defectMode = null;
     App.placeMode = null;
     App.projectId = proj.id;
     App.cutplan = d.cutplan || null;      // 恢复裁切工序（签名一致时生效）
@@ -337,6 +394,7 @@ function renderAll() {
   Canvas.render();
   UI.renderTabs();
   UI.renderSelection();
+  UI.renderDefectsList();
   UI.renderViolations();
   UI.renderUnplaced();
   UI.renderStatus();
