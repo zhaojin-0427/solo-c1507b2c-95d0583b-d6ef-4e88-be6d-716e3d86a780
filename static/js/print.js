@@ -112,11 +112,41 @@ const Print = {
            `<text x="${mx}" y="${my + fs * 0.28}" font-size="${fs * 0.75}" fill="#fff" text-anchor="middle" font-weight="bold">${i + 1}</text>`;
     });
 
-    // 零件
+    // 零件（毛坯外廓 + 成品轮廓 + 封边方向）
     parts.forEach((p) => {
-      s += `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" fill="${colorFor(p.partId)}" fill-opacity="0.55" stroke="#333" stroke-width="${fs * 0.08}"/>`;
-      // 零件容缺容许区（蓝色虚线）
       const pd = App.uidPart(p.uid);
+      let pr = null;
+      if (pd) pr = Edging.productRect(p, pd);
+      // 毛坯
+      s += `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" fill="${colorFor(p.partId)}" fill-opacity="0.45" stroke="#333" stroke-width="${fs * 0.08}"/>`;
+      // 成品轮廓（与毛坯不同时蓝色实线标出）
+      if (pr && (Math.abs(pr.w - p.w) > 1e-6 || Math.abs(pr.h - p.h) > 1e-6 ||
+                 Math.abs(pr.ox) > 1e-6 || Math.abs(pr.oy) > 1e-6)) {
+        s += `<rect x="${pr.x}" y="${pr.y}" width="${pr.w}" height="${pr.h}" fill="none" stroke="#00695c" stroke-width="${fs * 0.1}" stroke-dasharray="${fs * 0.45} ${fs * 0.25}"/>`;
+      }
+      // 待封边方向（批次配色实线，画在成品边上，向外小箭头）
+      if (pd) {
+        const batches = App.edgingBatches();
+        const colorOf = (mat, th) => {
+          const b = batches.find(x => x.material === (mat || '未命名材料') &&
+            Math.abs(x.thickness - th) < 1e-9);
+          return b ? Edging.batchColor(b.key) : '#5d4037';
+        };
+        Edging.visualEdges(pd, !!p.rotated).forEach((e) => {
+          if (!e.banded) return;
+          const col = colorOf(e.material, e.thickness);
+          const sw = Math.max(fs * 0.1, Math.min(fs * 0.32, e.thickness * fs * 0.08));
+          if (e.key === 'top')
+            s += `<line x1="${pr.x}" y1="${pr.y}" x2="${pr.x + pr.w}" y2="${pr.y}" stroke="${col}" stroke-width="${sw}"/>`;
+          else if (e.key === 'bottom')
+            s += `<line x1="${pr.x}" y1="${pr.y + pr.h}" x2="${pr.x + pr.w}" y2="${pr.y + pr.h}" stroke="${col}" stroke-width="${sw}"/>`;
+          else if (e.key === 'left')
+            s += `<line x1="${pr.x}" y1="${pr.y}" x2="${pr.x}" y2="${pr.y + pr.h}" stroke="${col}" stroke-width="${sw}"/>`;
+          else
+            s += `<line x1="${pr.x + pr.w}" y1="${pr.y}" x2="${pr.x + pr.w}" y2="${pr.y + pr.h}" stroke="${col}" stroke-width="${sw}"/>`;
+        });
+      }
+      // 零件容缺容许区（蓝色虚线）
       if (pd && (pd.allowZones || []).length) {
         pd.allowZones.forEach((z) => {
           const zt = Defects.transformZone(z, p, pd);
@@ -129,8 +159,11 @@ const Print = {
            `<text x="${p.x + fs * 0.7}" y="${p.y + fs * 0.92}" font-size="${fs * 0.6}" fill="#fff" text-anchor="middle">${p.no}</text>`;
       if (Math.min(p.w, p.h) > fs * 2.2) {
         const name = esc(p.name || p.partId);
+        const dimTxt = pr && (Math.abs(pr.w - p.w) > 1e-6 || Math.abs(pr.h - p.h) > 1e-6)
+          ? `坯${fmtNum(p.w)}×${fmtNum(p.h)} 成品${fmtNum(pr.w)}×${fmtNum(pr.h)}`
+          : `${fmtNum(p.w)}×${fmtNum(p.h)}`;
         s += `<text x="${p.x + p.w / 2}" y="${p.y + p.h / 2}" font-size="${fs * 0.7}" text-anchor="middle" fill="#222">${name}</text>`;
-        s += `<text x="${p.x + p.w / 2}" y="${p.y + p.h / 2 + fs * 0.85}" font-size="${fs * 0.6}" text-anchor="middle" fill="#444">${fmtNum(p.w)}×${fmtNum(p.h)}${p.rotated ? ' ⟳' : ''}</text>`;
+        s += `<text x="${p.x + p.w / 2}" y="${p.y + p.h / 2 + fs * 0.85}" font-size="${fs * 0.55}" text-anchor="middle" fill="#444">${dimTxt}${p.rotated ? ' ⟳' : ''}</text>`;
       }
       // 拼纹组徽标：组号 + 安装次序
       if (typeof Grain !== 'undefined') {
@@ -250,6 +283,31 @@ const Print = {
       body += `
       <p class="meta">裁切工序：共 ${totCuts} 刀 · 翻板 ${totFlips} 次 · 可复用余料 ${fmtArea(totReuse)}${totManual ? ` · <b style="color:#c62828">人工处理 ${totManual} 项</b>` : ''}</p>`;
     }
+    // 封边工序批次（按材料+厚度合并；顺序与边段取自当前方案设置）
+    if (typeof Edging !== 'undefined') {
+      const batches = App.edgingBatches();
+      if (batches.length) {
+        const modeTxt = { shortFirst: '先短边后长边', longFirst: '先长边后短边', manual: '手动换序' }
+          [(App.edgingOrder || {}).mode || 'shortFirst'];
+        let segTotal = 0, lenTotal = 0;
+        const secs = batches.map((b) => {
+          segTotal += b.count; lenTotal += b.total;
+          const segs = b.segments.map((s, i) => `<tr><td>${i + 1}</td>
+            <td>${esc(s.uid)}</td><td>${esc(s.name || '')}</td>
+            <td>${({ top: '上', right: '右', bottom: '下', left: '左' })[s.edgeVisual]}</td>
+            <td>${fmtNum(s.length)}</td>
+            <td>${esc(s.sheetId)} #${s.instance + 1}</td>
+            <td>${fmtNum(s.thickness)} · 余量${fmtNum(s.trim)}</td></tr>`).join('');
+          return `<h3>批次 ${b.index}：${esc(b.material)} · ${fmtNum(b.thickness)}mm
+            <span class="meta">（${b.count} 段，合计 ${fmtNum(b.total)} mm）</span></h3>
+            <table><thead><tr><th>顺序</th><th>零件</th><th>名称</th><th>封边方向</th><th>段长 mm</th><th>板材</th><th>厚度/余量</th></tr></thead>
+            <tbody>${segs}</tbody></table>`;
+        }).join('');
+        body += `<section class="sheet-page"><h2>封边工序（批次顺序：${modeTxt}）</h2>
+          <p class="meta">共 ${batches.length} 批次 · ${segTotal} 段 · 封边条总用量 <b>${fmtNum(lenTotal)} mm（${(lenTotal / 1000).toFixed(2)} m）</b>。
+          同材料、同厚度合并为一批；零件旋转后封边方向随外形换向。</p>${secs}</section>`;
+      }
+    }
 
     lay.sheets.forEach((si, idx) => {
       if (!si.placements.length) return;
@@ -263,9 +321,21 @@ const Print = {
         `<td>${esc(this.producesLabel(s))}</td></tr>`).join('');
       const partRows = r.parts.map(p => {
         const grp = (typeof Grain !== 'undefined') ? Grain.groupOf(p.uid) : null;
+        const pd = App.uidPart(p.uid);
+        let edgeTxt = '—';
+        if (pd) {
+          const ves = Edging.visualEdges(pd, !!p.rotated);
+          edgeTxt = ves.filter(e => e.banded).map(e =>
+            ({ top: '上', right: '右', bottom: '下', left: '左' })[e.key] +
+            `${fmtNum(e.thickness)}`).join('、') || '—';
+        }
+        const pr = pd ? Edging.productRect(p, pd) : null;
         return `<tr><td>${p.no}</td><td>${esc(p.uid)}</td><td>${esc(p.name || p.partId)}</td>` +
-          `<td>${fmtNum(p.w)} × ${fmtNum(p.h)}</td><td>(${fmtNum(p.x)}, ${fmtNum(p.y)})</td>` +
+          `<td>${fmtNum(p.w)} × ${fmtNum(p.h)}</td>` +
+          `<td>${pr ? fmtNum(pr.w) + ' × ' + fmtNum(pr.h) : '—'}</td>` +
+          `<td>(${fmtNum(p.x)}, ${fmtNum(p.y)})</td>` +
           `<td>${p.rotated ? '已旋转 90°' : '未旋转'}</td>` +
+          `<td>${edgeTxt}</td>` +
           `<td>${grp ? esc(grp.id) + '（第' + (grp.members.indexOf(p.uid) + 1) + '件）' : '—'}</td></tr>`;
       }).join('');
       let defectHtml = '';
@@ -300,8 +370,8 @@ const Print = {
           <h3>裁切工序（切割顺序，图中蓝色编号即顺序）</h3>
           <table><thead><tr><th>顺序</th><th>类型</th><th>切线位置 (mm)</th><th>切前子板 (mm)</th><th>行程 (mm)</th><th>产出</th></tr></thead><tbody>${cutRows || '<tr><td colspan="6">—</td></tr>'}</tbody></table>
           ${manualHtml}
-          <h3>零件清单（位置为板材左上角原点坐标）</h3>
-          <table><thead><tr><th>编号</th><th>标识</th><th>名称</th><th>尺寸 (mm)</th><th>位置 (x, y)</th><th>方向</th><th>拼纹组（安装次序）</th></tr></thead><tbody>${partRows}</tbody></table>
+          <h3>零件清单（位置为板材左上角原点坐标；毛坯用于裁切、成品用于对花）</h3>
+          <table><thead><tr><th>编号</th><th>标识</th><th>名称</th><th>毛坯尺寸 (mm)</th><th>成品尺寸 (mm)</th><th>位置 (x, y)</th><th>方向</th><th>封边方向（厚mm）</th><th>拼纹组（安装次序）</th></tr></thead><tbody>${partRows}</tbody></table>
         </section>`;
     });
 

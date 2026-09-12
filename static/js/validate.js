@@ -160,7 +160,8 @@ const Validate = {
           `拼纹组 ${g.id} 要求全部取自同一张板，但当前分布在多张板上`, null);
       }
     });
-    // 补偿后接缝超限：逐对相邻成员按封边补偿估算最小可达成品间隙
+    // 补偿后接缝超限：按当前摆放逐对相邻成员核算实际成品净距。
+    // 成品净距 = 毛坯净距 + 前件正向边补偿 + 后件负向边补偿（补偿为负）。
     if (typeof Edging !== 'undefined') {
       grain.groups.forEach((g) => {
         for (let k = 0; k + 1 < g.members.length; k++) {
@@ -170,22 +171,19 @@ const Validate = {
           if (!pa || !pb) continue;
           const axis = g.dir === 'h' ? 'x' : 'y';
           const ra = Grain.findOnBoard(lay, a.uid).placement;
-          const visTrail = axis === 'x' ? 'right' : 'bottom';
-          const visLead = axis === 'x' ? 'left' : 'top';
-          // 外形边 → canonical 边
-          const canon = (pd, vis, rot) => Edging.canonicalKey(vis, rot);
-          const ea = Edging.edge(pa, canon(pa, visTrail, !!ra.rotated));
           const rb = Grain.findOnBoard(lay, b.uid).placement;
-          const eb = Edging.edge(pb, canon(pb, visLead, !!rb.rotated));
-          const ta = Edging.edgeComp(ea), tb = Edging.edgeComp(eb);
-          const minProd = gap - ta - tb;
-          if (minProd > g.productGap + g.tolerance + this.EPS) {
+          const pra = Grain._prodRect(ra, a.uid), prb = Grain._prodRect(rb, b.uid);
+          const prodGap = axis === 'x'
+            ? prb.x - (pra.x + pra.w)
+            : prb.y - (pra.y + pra.h);
+          const allowed = g.productGap + g.tolerance + this.EPS;
+          if (prodGap > allowed) {
             flag(a.uid, 'grainmatch'); flag(b.uid, 'grainmatch');
-            const sA = `${Edging.LABELS[canon(pa, visTrail, !!ra.rotated)]}${ea.kind === 'exposed' ? '封' + fmtNum(ea.thickness) + 'mm' : ''}`;
-            const sB = `${Edging.LABELS[canon(pb, visLead, !!rb.rotated)]}${eb.kind === 'exposed' ? '封' + fmtNum(eb.thickness) + 'mm' : ''}`;
+            const edgeA = Edging.LABELS[Edging.canonicalKey(axis === 'x' ? 'right' : 'bottom', !!ra.rotated)];
+            const edgeB = Edging.LABELS[Edging.canonicalKey(axis === 'x' ? 'left' : 'top', !!rb.rotated)];
             say(null, 'grainmatch',
-              `拼纹组 ${g.id} 接缝 ${a.uid}–${b.uid} 补偿后超限：${a.uid} ${sA} 与 ${b.uid} ${sB} ` +
-              `封边后最小成品间隙 ${fmtNum(minProd)}mm，超过成品间隙 ${fmtNum(g.productGap)}mm + 容差 ${fmtNum(g.tolerance)}mm`,
+              `拼纹组 ${g.id} 接缝 ${a.uid}–${b.uid} 补偿后接缝超限：${a.uid} ${edgeA} 与 ${b.uid} ${edgeB} ` +
+              `封边后实际成品净距 ${fmtNum(prodGap)}mm，超过成品间隙 ${fmtNum(g.productGap)}mm + 容差 ${fmtNum(g.tolerance)}mm`,
               { type: 'seam', groupId: g.id, from: a.uid, to: b.uid,
                 sheetIndex: b.sheetIndex });
           }

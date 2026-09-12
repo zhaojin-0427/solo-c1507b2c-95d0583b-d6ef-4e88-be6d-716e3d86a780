@@ -29,13 +29,13 @@ global.renderAll = () => {};  // App.undo/redo 会调用，测试中无需真实
 global.Canvas = { svg: { querySelectorAll: () => [] }, sheetOffsets: [] };
 
 /* ---- 加载被测模块 ---- */
-const src = ['state.js', 'defects.js', 'grain.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js', 'parttol.js']
+const src = ['state.js', 'edging.js', 'defects.js', 'grain.js', 'validate.js', 'cutplan.js', 'cutui.js', 'print.js', 'parttol.js']
   .map(f => fs.readFileSync(path.join(__dirname, '..', 'static', 'js', f), 'utf8'))
   .join('\n');
 eval(src + `
 global.App = App; global.Validate = Validate; global.Print = Print;
 global.CutPlan = CutPlan; global.CutUI = CutUI; global.Defects = Defects;
-global.PartTol = PartTol; global.Grain = Grain;
+global.PartTol = PartTol; global.Grain = Grain; global.Edging = Edging;
 global.recomputeLayoutStats = recomputeLayoutStats;
 global.guillotineCuts = guillotineCuts;
 `);
@@ -953,6 +953,138 @@ section('拼纹：违规标注与实时统计');
   eq(App.layout().stats.groupTotal, 1, '统计：拼纹组数');
   eq(App.layout().stats.groupComplete, 0, '统计：完整组 0');
   near(App.layout().stats.maxSeamOffset, 3, '统计：最大接缝偏差 3mm');
+}
+
+/* ================= 封边尺寸补偿 ================= */
+section('封边：毛坯/成品换算、旋转换向、批次与接缝校验');
+{
+  // 成品 600×400；左/右封 1mm（余量 0.5），上封 2mm（余量 0）
+  const edge = (kind, material, thickness, trim) => ({ kind: kind || 'none', material: material || '', thickness: thickness || 0, trim: trim || 0 });
+  const part = {
+    id: 'E1', name: '侧板', width: 600, height: 400, quantity: 1,
+    edges: { top: edge('exposed', 'ABS', 2, 0), right: edge('none'), bottom: edge('none'),
+             left: edge('exposed', 'PVC', 1, 0.5) },
+  };
+  Edging.ensureEdges(part);
+  const d = Edging.blankDims(part);
+  near(d.bw, 599.5, '毛坯宽 = 600 −1 +0.5');
+  near(d.bh, 398, '毛坯高 = 400 −2');
+  const g0 = Edging.productGeom(part, false);
+  near(g0.ox, -0.5, '未旋转成品 ox = 左边补偿 -0.5');
+  near(g0.oy, -2, '未旋转成品 oy = 上边补偿 -2');
+  const g1 = Edging.productGeom(part, true);
+  near(g1.ox, 0, '旋转成品 ox = comp.bottom(0)');
+  near(g1.oy, -0.5, '旋转成品 oy = comp.left(-0.5)');
+  near(g1.w, 400, '旋转成品宽 = 成品高');
+  near(g1.blankH, 599.5, '旋转毛坯高 = 未旋毛坯宽');
+  // 旋转换向（与后端一致）：canonical 右 → visual 上、上 → visual 左、左 → visual 下
+  const ves = Edging.visualEdges(part, true);
+  eq(ves.find(e => e.key === 'top').canonical, 'right', '旋转：上边来自 canonical 右边');
+  eq(ves.find(e => e.key === 'left').canonical, 'top', '旋转：左边来自 canonical 上边');
+  eq(ves.find(e => e.key === 'bottom').canonical, 'left', '旋转：下边来自 canonical 左边');
+
+  // 工序核对：毛坯非正指出具体边 / 外露未封 / 拼接误封
+  const bad = { id: 'E9', name: '坏', width: 10, height: 10, edges: {
+    top: edge('exposed', '', 0, 0), right: edge('none'),
+    bottom: edge('join', 'PVC', 1, 0), left: edge('exposed', 'A', 20, 0) } };
+  Edging.ensureEdges(bad);
+  const issues = Edging.partIssues(bad);
+  ok(issues.some(i => i.code === 'blanknonpositive' && /左边/.test(i.msg)), '毛坯非正指出左边');
+  ok(issues.some(i => i.code === 'exposedunbanded' && /上边/.test(i.msg)), '外露未封指出上边');
+  ok(issues.some(i => i.code === 'joinbanded' && /下边/.test(i.msg)), '拼接误封指出下边');
+
+  // 旧项目（无 edges）：毛坯 = 成品
+  const legacy = { id: 'L1', width: 300, height: 200 };
+  Edging.ensureEdges(legacy);
+  near(Edging.blankDims(legacy).bw, 300, '旧项目毛坯宽=成品');
+  near(Edging.blankDims(legacy).bh, 200, '旧项目毛坯高=成品');
+}
+
+section('封边：补偿后接缝成品净距（1mm/3mm 合格不得误报 9/7mm）');
+{
+  const band = { kind: 'exposed', material: 'PVC', thickness: 2, trim: 0 };
+  const none = { kind: 'none' };
+  const mkPart = (id, facingRight) => ({
+    id, name: '门', width: 500, height: 350, quantity: 1,
+    edges: { top: none, bottom: none,
+             left: facingRight ? none : band, right: facingRight ? band : none },
+  });
+  // 两侧各封 2mm，毛坯净距 5：成品净距 = 5−2−2 = 1，pgap=1/tol=3 → 合格
+  App.sheets = [{ id: 'S1', name: '板', width: 2440, height: 1220, grain: 'none', quantity: 1 }];
+  App.parts = [mkPart('A', true), mkPart('B', false)];
+  App.grainGroups = [{ id: 'G1', dir: 'h', productGap: 1, tolerance: 3, sameSheet: true,
+    members: ['A#1', 'B#1'] }];
+  const geomA = Edging.productGeom(App.parts[0], false);
+  const geomB = Edging.productGeom(App.parts[1], false);
+  App.layouts = [{ id: 1, strategy: 't', sheets: [{ sheetId: 'S1', instance: 0, width: 2440, height: 1220, placements: [
+    { uid: 'A#1', partId: 'A', x: 5, y: 5, w: 498, h: 350, rotated: false, product: geomA },
+    { uid: 'B#1', partId: 'B', x: 508, y: 5, w: 498, h: 350, rotated: false, product: geomB },
+  ] }], unplaced: [], stats: {} }];
+  App.active = 0;
+  let v = Validate.check();
+  ok(!v.messages.some(m => m.code === 'grainmatch'), '成品净距 1mm 合格：无误报超限');
+  // 单边封 2mm（A 右侧）：B 不封边，成品净距 = 5−2 = 3
+  App.parts[1].edges = { top: none, bottom: none, left: none, right: none };
+  App.layouts[0].sheets[0].placements[1].w = 500;
+  App.layouts[0].sheets[0].placements[1].product = Edging.productGeom(App.parts[1], false);
+  App.layouts[0].sheets[0].placements[1].x = 508;
+  v = Validate.check();
+  ok(!v.messages.some(m => m.code === 'grainmatch'), '成品净距 3mm 合格：无误报超限');
+
+  // 修边余量把接缝撑到 19mm（>2+2）→ 必须报超限（独立状态，避免前例泄漏）
+  App.parts = [
+    { id: 'A', name: '门', width: 500, height: 350, quantity: 1,
+      edges: { top: none, bottom: none, left: none,
+        right: { kind: 'exposed', material: 'PVC', thickness: 1, trim: 8 } } },
+    { id: 'B', name: '门', width: 500, height: 350, quantity: 1,
+      edges: { top: none, bottom: none, right: none,
+        left: { kind: 'exposed', material: 'PVC', thickness: 1, trim: 8 } } },
+  ];
+  App.grainGroups = [{ id: 'G1', dir: 'h', productGap: 2, tolerance: 2, sameSheet: true,
+    members: ['A#1', 'B#1'] }];
+  // 毛坯 507（=500−1+8），毛坯净距 5 → 成品净距 = 5+7+7 = 19
+  App.layouts = [{ id: 1, strategy: 't', sheets: [{ sheetId: 'S1', instance: 0, width: 2440, height: 1220, placements: [
+    { uid: 'A#1', partId: 'A', x: 5, y: 5, w: 507, h: 350, rotated: false, product: Edging.productGeom(App.parts[0], false) },
+    { uid: 'B#1', partId: 'B', x: 517, y: 5, w: 507, h: 350, rotated: false, product: Edging.productGeom(App.parts[1], false) },
+  ] }], unplaced: [], stats: {} }];
+  App.active = 0;
+  const v19 = Validate.check();
+  ok(v19.messages.some(m => m.code === 'grainmatch' && /补偿后接缝超限/.test(m.msg) && /19/.test(m.msg)),
+    '补偿后成品净距 19mm 超限被标出（含具体数值与边）');
+}
+
+section('封边：批次合并、顺序与用量统计');
+{
+  const e = (mat, th) => ({ kind: 'exposed', material: mat, thickness: th, trim: 0 });
+  const n = { kind: 'none' };
+  App.parts = [
+    { id: 'Q1', name: '长', width: 600, height: 400, quantity: 1,
+      edges: { top: e('ABS', 2), bottom: n, left: e('ABS', 2), right: n } },
+    { id: 'Q2', name: '短', width: 300, height: 200, quantity: 1,
+      edges: { top: e('ABS', 2), bottom: n, left: n, right: n } },
+  ];
+  App.sheets = [{ id: 'S1', width: 1000, height: 1000, grain: 'none', quantity: 1 }];
+  App.layouts = [{ id: 1, sheets: [{ sheetId: 'S1', instance: 0, width: 1000, height: 1000, placements: [
+    { uid: 'Q1#1', partId: 'Q1', x: 0, y: 0, w: 596, h: 396, rotated: false },
+    { uid: 'Q2#1', partId: 'Q2', x: 0, y: 401, w: 296, h: 196, rotated: false },
+  ] }], unplaced: [], stats: {} }];
+  App.active = 0; App.edgingOrder = { mode: 'shortFirst', orders: {} };
+  let b = Edging.batches(App.layout(), 'shortFirst', {});
+  eq(b.length, 1, '同材料同厚度合并为 1 批');
+  eq(b[0].count, 3, '共 3 段（2 长 1 短）');
+  near(b[0].total, 400 + 600 + 300, '用量合计 = 短边优先排序不影响合计 1300');
+  eq(b[0].segments[0].length, 300, '先短边：第 1 段 300');
+  const bl = Edging.batches(App.layout(), 'longFirst', {});
+  eq(bl[0].segments[0].length, 600, '先长边：第 1 段 600');
+  // 手动换序
+  const segs = bl[0].segments.slice();
+  [segs[0], segs[2]] = [segs[2], segs[0]];
+  const order = segs.map(s => s.uid + '|' + s.edgeVisual);
+  const bm = Edging.batches(App.layout(), 'manual', { [b[0].key]: order });
+  eq(bm[0].segments[0].uid, 'Q2#1', '手动次序生效：首段为短件');
+  // 段方向标注：Q1 上边/左边
+  const q1 = b[0].segments.filter(s => s.uid === 'Q1#1').map(s => s.edgeVisual).sort();
+  ok(q1.join(',') === 'left,top', '段带封边方向（上、左）');
 }
 
 /* ================= 结果 ================= */

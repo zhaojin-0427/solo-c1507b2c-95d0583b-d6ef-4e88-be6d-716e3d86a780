@@ -500,3 +500,70 @@ input:focus, select:focus { outline: 2px solid #90caf9; }
 /* 参数编辑模态框 */
 .gparam label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .gparam label.chk { flex-direction: row; align-items: center; color: var(--text); }
+
+/* ================= 封边尺寸补偿 ================= */
+.part-rect.part-blank { fill-opacity: .55; }
+.part-product {
+  fill: none; stroke: #00695c; stroke-width: 1.6;
+  stroke-dasharray: 7 4; pointer-events: none;
+}
+.edge-band { fill: none; pointer-events: none; stroke-linecap: butt; opacity: .95; }
+.part-dim-prod { fill: #00695c; }
+.v-edge .part-rect { stroke: #6a1b9a; stroke-width: 3; }
+.edge-msg { background: #f3e5f5; color: #6a1b9a; }
+.edge-msg::before { content: "▰ "; }
+
+.edge-btn {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px; border: 1px solid #80cbc4;
+  background: #e0f2f1; color: #00695c; cursor: pointer; white-space: nowrap;
+}
+.edge-btn:hover { background: #b2dfdb; }
+.edge-btn.edge-warn { border-color: var(--danger); background: #ffebee; color: var(--danger); }
+
+/* 四边编辑模态框 */
+.edge-grid { display: flex; gap: 14px; }
+.edge-svg-wrap { flex: 1 1 46%; min-width: 260px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: #fafafa; }
+#edge-svg { width: 100%; height: 320px; }
+.edge-part-rect { fill: #efebe9; stroke: #5d4037; stroke-width: 1.5; }
+.edge-part-name { font-size: 15px; fill: #4e342e; font-weight: 700; }
+.edge-mark-line { fill: none; }
+.edge-mark-text { font-size: 13px; font-weight: 700; }
+.edge-fields { flex: 1 1 54%; display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; }
+.edge-row { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+.edge-row-h { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.edge-row-b { display: flex; gap: 8px; flex-wrap: wrap; }
+.edge-row-b label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 3px; }
+.edge-row-b input[type=number] { width: 56px; }
+.edge-row-b input[type=text] { width: 110px; }
+.edge-row.edge-kind-exposed { border-left: 4px solid #00897b; }
+.edge-row.edge-kind-join { border-left: 4px solid #1565c0; }
+.edge-calc { margin-top: 10px; }
+.edge-calc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.edge-calc-table th, .edge-calc-table td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; }
+.edge-calc-table th { background: #f0f0f0; }
+.edge-calc-exposed td { background: #e0f2f1; }
+.edge-calc-join td { background: #e3f2fd; }
+.edge-calc-sum { margin-top: 8px; font-size: 12px; color: #37474f; }
+.edge-calc-sum.bad { color: var(--danger); font-weight: 700; }
+.edge-bad-tag { margin-left: 10px; background: #ffebee; border: 1px solid var(--danger); border-radius: 4px; padding: 1px 8px; }
+
+/* 封边工序面板 */
+.edge-mode-bar { display: flex; gap: 16px; align-items: center; margin: 8px 0; font-size: 13px; }
+.edge-mode-bar label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.edge-batch-sum { font-size: 13px; margin: 6px 0 10px; padding: 6px 10px; background: #e0f2f1; border-radius: 6px; color: #00695c; }
+.edge-batch-body { max-height: 62vh; overflow-y: auto; }
+.edge-batch { margin-bottom: 14px; }
+.edge-batch h4 { margin: 6px 0; font-size: 13px; }
+.edge-batch-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 4px; }
+.edge-batch-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.edge-batch-table th, .edge-batch-table td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; }
+.edge-batch-table th { background: #f0f0f0; }
+
+/* 选中零件四边表 */
+.sel-edge-table { width: 100%; border-collapse: collapse; font-size: 11px; margin: 2px 0 4px; }
+.sel-edge-table th, .sel-edge-table td { border: 1px solid var(--border); padding: 2px 4px; }
+.sel-edge-table th { background: #f4f4f4; }
+.sel-edge-table .edge-calc-exposed td { background: #e0f2f1; }
+.sel-edge-table .edge-calc-join td { background: #e3f2fd; }
+.sel-edge-row { align-items: center; gap: 6px; flex-wrap: wrap; }
+.sel-edge-sum { font-size: 11px; color: #00695c; margin-bottom: 4px; }

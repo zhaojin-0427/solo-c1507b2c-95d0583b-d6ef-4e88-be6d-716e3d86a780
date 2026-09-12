@@ -719,5 +719,166 @@ class TestGrainMatchingGroups(unittest.TestCase):
         self.assertEqual(s0["grainBase"], {"x": 0, "y": 0})
 
 
+class TestEdgeCompensation(unittest.TestCase):
+    """封边尺寸补偿：毛坯计算 / 排样按毛坯 / 接缝按成品 / 工序核对 / 旧数据兼容"""
+
+    def payload(self, edges_l, edges_r=None, group_gap=2, tol=3):
+        edges_r = edges_r if edges_r is not None else edges_l
+        return {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [{"id": "S1", "name": "板", "width": 2440, "height": 1220,
+                        "grain": "none", "quantity": 1}],
+            "parts": [
+                {"id": "P1", "name": "门A", "width": 500, "height": 350,
+                 "quantity": 1, "rotatable": False, "grain": "none",
+                 "edges": edges_l},
+                {"id": "P2", "name": "门B", "width": 500, "height": 350,
+                 "quantity": 1, "rotatable": False, "grain": "none",
+                 "edges": edges_r},
+            ],
+            "grainGroups": [{"id": "G1", "dir": "h", "productGap": group_gap,
+                             "tolerance": tol, "sameSheet": True,
+                             "members": ["P1#1", "P2#1"]}],
+        }
+
+    def test_blank_dims_formula(self):
+        from nesting import blank_dims, product_geom, visual_edges
+        p = {"id": "P", "width": 600, "height": 400, "edges": {
+            "left": {"kind": "exposed", "material": "PVC", "thickness": 1, "trim": 0.5},
+            "right": {"kind": "exposed", "material": "PVC", "thickness": 1, "trim": 0.5},
+            "top": {"kind": "exposed", "material": "ABS", "thickness": 2, "trim": 0}}}
+        bw, bh, comp = blank_dims(p)
+        self.assertAlmostEqual(bw, 599.0)     # 600 - 2 + 1
+        self.assertAlmostEqual(bh, 398.0)     # 400 - 2
+        g = product_geom(p, False)
+        self.assertEqual((g["w"], g["h"], g["ox"], g["oy"]), (600.0, 400.0, -0.5, -2.0))
+        # 旋转：canonical 左封边→visual 上悬出，成品偏移 (comp.bottom=0, comp.left=-0.5)
+        gr = product_geom(p, True)
+        self.assertEqual((gr["w"], gr["h"], gr["ox"], gr["oy"]), (400.0, 600.0, 0.0, -0.5))
+        ves = {e["key"]: e for e in visual_edges(p, True)}
+        self.assertEqual(ves["bottom"]["canonical"], "left")
+        self.assertEqual(ves["top"]["canonical"], "right")
+
+    def test_layout_uses_blank_product_seam_uses_finished(self):
+        # A 右边封 2mm、B 左边封 2mm：毛坯净距 6mm（≥kerf+spacing=5 不可行）
+        # 实际引擎取最小可行毛坯净距 6 → 成品净距 = 6 − 2 − 2 = 2
+        edges = {
+            "left": {"kind": "none"}, "top": {"kind": "none"}, "bottom": {"kind": "none"},
+            "right": {"kind": "exposed", "material": "ABS", "thickness": 2, "trim": 0}}
+        edges_l = dict(edges)
+        edges_r = {"left": edges["right"], "right": {"kind": "none"},
+                   "top": {"kind": "none"}, "bottom": {"kind": "none"}}
+        res = generate_layouts(self.payload(edges_l, edges_r, 2, 2))
+        self.assertFalse(res.get("error"), res.get("error"))
+        lay = res["layouts"][0]
+        ps = sorted((p for s in lay["sheets"] for p in s["placements"]
+                     if p["partId"] in ("P1", "P2")), key=lambda p: p["x"])
+        self.assertEqual(len(ps), 2)
+        # 毛坯宽 = 500-2=498
+        self.assertEqual((ps[0]["w"], ps[1]["w"]), (498.0, 498.0))
+        blank_gap = ps[1]["x"] - (ps[0]["x"] + ps[0]["w"])
+        self.assertGreaterEqual(blank_gap, 5 - 1e-6)     # 毛坯留锯缝
+        a_edge = ps[0]["x"] + ps[0]["product"]["ox"] + ps[0]["product"]["w"]
+        b_edge = ps[1]["x"] + ps[1]["product"]["ox"]
+        self.assertAlmostEqual(b_edge - a_edge, 2.0, places=6)  # 成品间隙
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")
+        self.assertTrue(all(s["qualified"] for s in g["seams"]))
+        self.assertEqual(g["seams"][0]["offset"], 0)
+
+    def test_compensated_seam_exceeds_tolerance(self):
+        # 两侧修边余量 8mm（厚度 1mm → 边补偿 +7）：最小毛坯净距 5mm 对应
+        # 成品净距 = 5+7+7 = 19mm，超过成品间隙 2 + 容差 2 = 4 → 同板失败
+        band = {"kind": "exposed", "material": "PVC", "thickness": 1, "trim": 8}
+        none = {"kind": "none"}
+        edges_l = {"left": none, "right": band, "top": none, "bottom": none}
+        edges_r = {"left": band, "right": none, "top": none, "bottom": none}
+        res = generate_layouts(self.payload(edges_l, edges_r, 2, 2))
+        lay = res["layouts"][0]
+        self.assertEqual(lay["grainGroups"][0]["status"], "failed")
+        self.assertTrue(lay["unplaced"])
+        joined = "；".join(u["reason"] for u in lay["unplaced"])
+        self.assertIn("补偿后接缝超限", joined)
+
+    def test_product_gap_one_and_three_mm_qualified(self):
+        # 回归用户报障：实际成品净距 1mm/3mm 的合格接缝不得误报为 9/7mm 超限。
+        # 两侧各封 2mm：毛坯净距 5 时，成品净距 = 5−2−2 = 1（pgap=1，合格）；
+        # 单侧边封 2mm：成品净距 = 5−2 = 3（pgap=3，合格）。
+        band = {"kind": "exposed", "material": "PVC", "thickness": 2, "trim": 0}
+        none = {"kind": "none"}
+        # 两侧封边，成品净距 1mm
+        both = self.payload({"left": none, "right": band, "top": none, "bottom": none},
+                            {"left": band, "right": none, "top": none, "bottom": none},
+                            group_gap=1, tol=3)
+        lay = generate_layouts(both)["layouts"][0]
+        ps = sorted((p for s in lay["sheets"] for p in s["placements"]), key=lambda p: p["x"])
+        a, b = ps[0], ps[1]
+        prod_gap = (b["x"] + b["product"]["ox"]) - \
+                   (a["x"] + a["product"]["ox"] + a["product"]["w"])
+        self.assertEqual(lay["grainGroups"][0]["status"], "complete")
+        self.assertAlmostEqual(prod_gap, 1.0, places=6)
+        self.assertTrue(all(s["qualified"] for s in lay["grainGroups"][0]["seams"]))
+        # 仅 A 右侧封边：成品净距 = 毛坯 5 − 2 = 3
+        one = self.payload({"left": none, "right": band, "top": none, "bottom": none},
+                           {"left": none, "right": none, "top": none, "bottom": none},
+                           group_gap=3, tol=3)
+        lay2 = generate_layouts(one)["layouts"][0]
+        ps2 = sorted((p for s in lay2["sheets"] for p in s["placements"]), key=lambda p: p["x"])
+        prod_gap2 = (ps2[1]["x"] + ps2[1]["product"]["ox"]) - \
+                    (ps2[0]["x"] + ps2[0]["product"]["ox"] + ps2[0]["product"]["w"])
+        self.assertEqual(lay2["grainGroups"][0]["status"], "complete")
+        self.assertAlmostEqual(prod_gap2, 3.0, places=6)
+
+    def test_edge_issues_named_part_and_edge(self):
+        from nesting import part_edge_issues
+        p = {"id": "P9", "name": "坏件", "width": 10, "height": 10, "edges": {
+            "top": {"kind": "exposed"},                                   # 外露未封
+            "bottom": {"kind": "join", "material": "PVC", "thickness": 1},  # 拼接误封
+            "left": {"kind": "exposed", "material": "ABS", "thickness": 20},  # 毛坯非正
+            "right": {"kind": "none"}}}
+        codes = {i["code"]: i["msg"] for i in part_edge_issues(p)}
+        self.assertIn("blanknonpositive", codes)
+        self.assertIn("左边", codes["blanknonpositive"])   # 指出造成超扣的具体边
+        self.assertIn("exposedunbanded", codes)
+        self.assertIn("上边", codes["exposedunbanded"])
+        self.assertIn("joinbanded", codes)
+        self.assertIn("下边", codes["joinbanded"])
+        # 排样结果顶层携带 edgeIssues，毛坯非正件列入未放置
+        bad_payload = {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [{"id": "S1", "name": "板", "width": 500, "height": 500,
+                        "grain": "none", "quantity": 1}],
+            "parts": [{"id": "P9", "name": "坏件", "width": 10, "height": 10,
+                       "quantity": 1, "rotatable": False, "grain": "none",
+                       "edges": p["edges"]}],
+        }
+        res = generate_layouts(bad_payload)
+        self.assertTrue(any(i["partId"] == "P9" for i in res["edgeIssues"]))
+        lay = res["layouts"][0]
+        self.assertTrue(any(u["partId"] == "P9" and "毛坯尺寸" in u["reason"]
+                            for u in lay["unplaced"]))
+
+    def test_legacy_parts_no_edges_blank_equals_finished(self):
+        from nesting import expand_parts, blank_dims
+        p = {"id": "P", "width": 300, "height": 200, "quantity": 2}  # 无 edges
+        insts = expand_parts([p])
+        self.assertEqual((insts[0]["w"], insts[0]["h"]), (300.0, 200.0))
+        bw, bh, _ = blank_dims(p)
+        self.assertEqual((bw, bh), (300.0, 200.0))
+        # 排样行为与旧版一致（成品即毛坯）
+        payload = {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [{"id": "S1", "name": "板", "width": 1000, "height": 1000,
+                        "grain": "none", "quantity": 1}],
+            "parts": [{"id": "P1", "name": "件", "width": 300, "height": 200,
+                       "quantity": 2, "rotatable": True, "grain": "none"}],
+        }
+        lay = generate_layouts(payload)["layouts"][0]
+        self.assertEqual(lay["stats"]["unplacedCount"], 0)
+        q = lay["sheets"][0]["placements"][0]
+        self.assertEqual((q["w"], q["h"]), (300.0, 200.0))
+        self.assertEqual(q["product"], {"w": 300.0, "h": 200.0, "ox": 0.0, "oy": 0.0})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -119,27 +119,31 @@ def visual_edges(p, rotated=False):
 def product_geom(p, rotated=False):
     """成品在毛坯外形坐标中的几何 {w,h,ox,oy}（毛坯局部坐标，可为负=封边条悬出）。
 
-    约定（canonical 毛坯局部坐标，原点在成品本体左上角）：
-      未旋转：成品 x∈[comp.left, bw+comp.right]、y∈[comp.top, bh+comp.bottom]；
-      旋转 90°（视觉顺时针）：canonical 左边→visual 上边，成品占据
-      visual [0,ph]×[0,pw]，封边补偿悬出段落入 visual 右/下边。
+    未旋转：成品 x∈[comp.left, pw+comp.left]、y∈[comp.top, ph+comp.top]；
+    旋转 90°（视觉顺时针）：canonical 下封边→visual 左悬出、左封边→visual 上悬出，
+    成品偏移 (comp.bottom, comp.left)。
     """
     pw, ph = _f(p.get('width')), _f(p.get('height'))
     bw, bh, comp = blank_dims(p)
     if not rotated:
         return {'w': pw, 'h': ph, 'ox': comp['left'], 'oy': comp['top'],
                 'blankW': bw, 'blankH': bh, 'comp': comp}
-    return {'w': ph, 'h': pw, 'ox': 0.0, 'oy': 0.0,
+    return {'w': ph, 'h': pw, 'ox': comp['bottom'], 'oy': comp['left'],
             'blankW': bh, 'blankH': bw, 'comp': comp}
 
 
 def instance_product(inst, rotated=False):
-    """展开实例（已含 comp/productW/productH）→ 放置方向上的成品几何。"""
+    """展开实例（已含 comp/productW/productH）→ 放置方向上的成品几何。
+
+    未旋转：成品在毛坯局部 (comp.left, comp.top)（负值=成品悬出毛坯，即封边条）。
+    旋转 90°（视觉顺时针）：canonical 下封边→visual 左悬出、左封边→visual 上悬出，
+    成品原点偏移 (comp.bottom, comp.left)。
+    """
     if not rotated:
         return {'w': inst['productW'], 'h': inst['productH'],
                 'ox': inst['comp']['left'], 'oy': inst['comp']['top']}
-    return {'w': inst['productH'], 'h': inst['productW'], 'ox': 0.0, 'oy': 0.0}
-
+    return {'w': inst['productH'], 'h': inst['productW'],
+            'ox': inst['comp']['bottom'], 'oy': inst['comp']['left']}
 
 def prect(rec):
     """放置记录 → 成品外廓绝对/可用坐标矩形 {x,y,w,h}；无补偿数据时退化为毛坯矩形。"""
@@ -157,11 +161,19 @@ def part_edge_issues(p):
     返回 [{code, edge, msg}]，edge 为 canonical 边名。"""
     issues = []
     name = p.get('name') or p.get('id')
-    bw, bh, _ = blank_dims(p)
+    bw, bh, comp = blank_dims(p)
     if bw <= EPS or bh <= EPS:
+        culprits = []
+        for k in EDGE_KEYS:
+            c = comp[k]
+            if c < -EPS:
+                culprits.append(f"{EDGE_LABELS[k]} {c:g}mm")
         issues.append({'code': 'blanknonpositive', 'edge': None,
                        'msg': f"{p.get('id')}（{name}）封边补偿后毛坯尺寸为 "
-                              f"{bw:g}×{bh:g}mm，非正值无法下料（请减小封边厚度或修改成品尺寸）"})
+                              f"{bw:g}×{bh:g}mm，非正值无法下料（成品 "
+                              f"{_f(p.get('width')):g}×{_f(p.get('height')):g}mm；"
+                              f"超扣边：{'、'.join(culprits) if culprits else '无'}，"
+                              f"请减小封边厚度或增大成品尺寸）"})
     for k in EDGE_KEYS:
         e = _edge_raw(p, k)
         lab = EDGE_LABELS[k]
@@ -357,12 +369,11 @@ def _seg_cross_proper(p1, p2, p3, p4):
 
 
 def transform_zone(zone, x, y, w, h, rotated, pw, ph, ox=0.0, oy=0.0):
-    """零件局部容许区多边形 → 放置后绝对/可用坐标。
+    """零件【成品局部】容许区多边形 → 放置后绝对/可用坐标。
 
-    与前端一致：旋转 90°（视觉顺时针，y 向下）映射 (lx,ly) → (x + ph - ly, y + lx)，
-    旋转后外接矩形为 ph × pw（旋转时成品占据毛坯 [0,0] 角，ox=oy=0）；
-    未旋转时成品在毛坯内偏移 (ox, oy)（封边补偿，可为负=封边条悬出毛坯）。
-    zone 结构为 {'points': [(lx,ly), ...]}，坐标为成品局部坐标。
+    未旋转：区域按成品偏移 (ox,oy) 平移；旋转 90°（视觉顺时针）映射
+    (lx,ly)→(x+ph−ly, y+lx)，此时成品在毛坯原点（ox=oy=0）。
+    坐标为成品局部坐标（未旋转时原点在成品左上角）。
     """
     out = []
     for p in (zone or {}).get('points') or []:
@@ -985,14 +996,16 @@ def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin,
     p_trail = (prev.get('trailComp') if isinstance(prev, dict) else None)
     if p_trail is None:
         p_trail = 0.0
-    min_blank_gap = max(gap, pgap - p_trail + c_lead)
+    # 成品净距 = 毛坯净距 + c_trail(前件) + c_lead(后件)（封边补偿为负，
+    # 封边条悬出段吃掉间隙）；故合格毛坯净距 = pgap − c_trail − c_lead。
+    min_blank_gap = max(gap, pgap - p_trail - c_lead)
     cands = set()
-    # 对花理想位置：毛坯净距 = pgap + k·T − trailComp + leadComp（物理冲突交给 _rect_ok）
+    # 对花理想位置：毛坯净距 = pgap + k·T − trailComp − leadComp
     if period and period > EPS:
         k = 0
         U = st['uw' if chain == 'x' else 'uh']
-        while edge + pgap - p_trail + c_lead + k * period <= U + EPS and k < 200:
-            c = edge + pgap - p_trail + c_lead + k * period
+        while edge + pgap - p_trail - c_lead + k * period <= U + EPS and k < 200:
+            c = edge + pgap - p_trail - c_lead + k * period
             if c >= start - EPS:
                 cands.add(c)
             k += 1
@@ -1052,6 +1065,25 @@ def _band_coords(chain, st, extra, gap, prev, first_band, inst=None, geom=None):
     # 0 带优先（整组通常贴可用区边成排/成列），其余升序
     ordered = sorted(cands)
     return ([0.0] if 0.0 in ordered else []) + [c for c in ordered if abs(c) > EPS]
+
+
+def _product_gap(prev, cur, chain):
+    """两条毛坯放置记录沿拼链方向的【成品净距】（含封边补偿；可用/绝对坐标均可）。"""
+    pp, cc = prect(prev), prect(cur)
+    if chain == 'x':
+        return cc['x'] - (pp['x'] + pp['w'])
+    return cc['y'] - (pp['y'] + pp['h'])
+
+
+def _product_gap_ok(prev, cur, chain, pgap, tol, min_phys_gap):
+    """封边补偿后成品净距是否可接受：
+
+    上限 pgap+tol（安装间隙不得过大，补偿后接缝超限的主要情形）；
+    下限 −min_phys_gap（毛坯已满足物理净距时，封边条悬出造成的成品边接近以
+    毛坯不重叠为度；严格为负的重叠由 _rect_ok 拦截）。
+    """
+    g = _product_gap(prev, cur, chain)
+    return g <= pgap + tol + EPS
 
 
 def _record_product(rec, chain):
@@ -1191,14 +1223,12 @@ def place_group(group, insts_by_uid, states, gap, margin):
                                                      chain, group, prev['state'], st, margin)
                             if not seam_qualified(seam, tol):
                                 continue
-                            # 无周期沿链对花：补偿后最小可达成品间隙仍超限 → 放弃
-                            if period <= EPS and st['def'].get('grain', 'none') == 'none' \
-                                    and seam['status'] == 'ok' and not seam['band']:
-                                min_gap = max(gap, pgap - prev['trailComp']
-                                             - _lead_comp(inst, chain, rot))
-                                # min_gap 即最优物理间隙对应的成品间隙
-                                if min_gap > pgap + tol + EPS:
-                                    continue
+                            # 无纹理板材接缝免核错花，但封边补偿后【成品净距】仍须在
+                            # 成品间隙 ± 容差内：按成品外廓直接核算
+                            if (st['def'].get('grain') or 'none') == 'none' and \
+                                    not _product_gap_ok(prev, cur_rec, chain,
+                                                       pgap, tol, gap):
+                                continue
                         found = (x, y)
                         break
                     if found:
@@ -1224,7 +1254,8 @@ def place_group(group, insts_by_uid, states, gap, margin):
             return {'ok': True, 'records': recs}
 
     if group['sameSheet']:
-        why_text = _group_fail_reason(group, members, compatible, gap, margin)
+        comp_reason = _group_comp_gap_reason(group, members, compatible, gap)
+        why_text = comp_reason or _group_fail_reason(group, members, compatible, gap, margin)
         for inst in members:
             blockers[inst['uid']] = [why_text, '拼纹组要求全部取自同一张板']
         return {'ok': False, 'blockers': blockers, 'why': 'sameSheet'}
@@ -1283,15 +1314,13 @@ def place_group(group, insts_by_uid, states, gap, margin):
                         if not seam_qualified(seam, tol):
                             seam_bad = seam
                             continue
-                        # 同板无周期沿链：补偿后最小可达成品间隙仍超限 → 放弃
-                        if same_prev is not None and period <= EPS and \
+                        # 无纹理板材接缝免核错花，但封边补偿后成品净距不得超过
+                        # 成品间隙 + 容差（修边余量等正补偿会把接缝撑大）
+                        if prev is not None and \
                                 st['def'].get('grain', 'none') == 'none' and \
-                                seam['status'] == 'ok' and not seam['band']:
-                            min_gap = max(gap, pgap - same_prev['trailComp']
-                                          + _lead_comp(inst, chain, rot))
-                            if min_gap > pgap + tol + EPS:
-                                seam_bad = seam
-                                continue
+                                not _product_gap_ok(prev, cur_rec, chain, pgap, tol, gap):
+                            seam_bad = seam
+                            continue
                     rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
                            'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot,
                            'product': prod, '_geom': geom}
@@ -1320,15 +1349,16 @@ def place_group(group, insts_by_uid, states, gap, margin):
                     f"接缝错花量 {seam_bad['offset']:g}mm 超过可接受值 {tol:g}mm（"
                     f"{prev['state']['def']['sheetId']} #{prev['state']['def']['instance'] + 1}"
                     f" → {st['def']['sheetId']} #{st['def']['instance'] + 1}）")
-            # 同板补偿后接缝超限：物理净距无法既留锯缝又满足成品间隙容差
+            # 同板补偿后接缝超限：封边补偿（修边余量等正补偿）把成品净距撑过大
             if same_prev is not None and seam_bad is not None and \
                     st['def'].get('grain', 'none') == 'none' and period <= EPS:
                 pside = EDGE_LABELS[_facing_side(chain, 'trail', same_prev['rot'])]
                 cside = EDGE_LABELS[_facing_side(chain, 'lead', rot)]
                 causes.add(
                     f"补偿后接缝超限：{same_prev['uid']} {pside} 与 {inst['uid']} {cside}"
-                    f"封边后，最小可达成品间隙 {max(gap, pgap - same_prev['trailComp'] + _lead_comp(inst, chain, rot)):g}mm"
-                    f" 仍超过成品间隙 {pgap:g}mm + 容差 {tol:g}mm")
+                    f"封边后，最小毛坯净距 {gap:g}mm 对应的成品净距 "
+                    f"{gap + same_prev['trailComp'] + _lead_comp(inst, chain, rot):g}mm"
+                    f" 超过成品间隙 {pgap:g}mm + 容差 {tol:g}mm")
             if not geom_feasible:
                 causes.add(
                     f"板材 {st['def']['sheetId']} #{st['def']['instance'] + 1} "
@@ -1354,6 +1384,32 @@ def place_group(group, insts_by_uid, states, gap, margin):
         blockers[inst['uid']] = reasons
     return {'ok': False, 'blockers': blockers,
             'why': 'phase' if phase_failed else 'space'}
+
+
+def _group_comp_gap_reason(group, members, compatible, gap):
+    """检测封边补偿导致的成品净距超限（无纹理板、相邻成员相对边）。"""
+    chain = 'x' if group['dir'] == 'h' else 'y'
+    pgap, tol = group['productGap'], group['tolerance']
+    for a, b in zip(members[:-1], members[1:]):
+        for st in compatible:
+            if (st['def'].get('grain') or 'none') != 'none':
+                continue
+            ga = _group_geom(a, st)
+            gb = _group_geom(b, st)
+            if not ga or not gb:
+                continue
+            # 双方在首选摆向下的相对边补偿
+            ca = _trail_comp(a, chain, ga[2])
+            cb = _lead_comp(b, chain, gb[2])
+            min_prod = gap + ca + cb
+            if min_prod > pgap + tol + EPS:
+                pside = EDGE_LABELS[_facing_side(chain, 'trail', ga[2])]
+                cside = EDGE_LABELS[_facing_side(chain, 'lead', gb[2])]
+                return (
+                    f"补偿后接缝超限：{a['uid']} {pside} 与 {b['uid']} {cside} "
+                    f"封边后，最小毛坯净距 {gap:g}mm 对应的成品净距 {min_prod:g}mm"
+                    f" 超过成品间隙 {pgap:g}mm + 容差 {tol:g}mm")
+    return None
 
 
 def _group_fail_reason(group, members, compatible, gap, margin):

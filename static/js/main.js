@@ -431,6 +431,7 @@ const Main = {
       parts: App.parts,
       defects: App.defects,
       grainGroups: App.grainGroups,
+      edgingOrder: App.edgingOrder,
       layouts: layouts.map(l => ({ ...l, _lastGood: undefined, adopted: !!l.adopted })),
       adoptedLayoutId: (layouts.find(l => l.adopted) || {}).id || null,
       active: Math.min(App.active, Math.max(0, layouts.length - 1)),
@@ -454,6 +455,9 @@ const Main = {
       { grainPeriod: 0, grainBase: { x: 0, y: 0 } }, s));
     App.parts = (d.parts || []).map(p => Object.assign(
       { faceReq: 'any', allowGrade: 0, allowZones: [] }, p));
+    // 旧项目无封边定义：四边均不处理，毛坯 = 成品原尺寸
+    if (typeof Edging !== 'undefined') App.parts.forEach(p => Edging.ensureEdges(p));
+    App.edgingOrder = d.edgingOrder || { mode: 'shortFirst', orders: {} };
     App.defects = d.defects || {};
     App.grainGroups = (d.grainGroups || []).map(g => Object.assign(
       { dir: 'h', productGap: 2, tolerance: 2, sameSheet: true, members: [] }, g));

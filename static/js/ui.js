@@ -55,6 +55,21 @@ const UI = {
       const faceTxt = { any: '任意', front: '正面', back: '反面', both: '双面' }[p.faceReq || 'any'] || '任意';
       const tol = (+p.allowGrade || 0)
         ? `≤${p.allowGrade}级${(p.allowZones || []).length ? '·圈区' : ''}` : '无';
+      // 封边摘要：外露边数 / 拼接边数 + 毛坯尺寸
+      let edgeSummary = '无封边', edgeCls = '';
+      if (typeof Edging !== 'undefined') {
+        Edging.ensureEdges(p);
+        const ves = Edging.visualEdges(p, false);
+        const nExp = ves.filter(e => e.kind === 'exposed').length;
+        const nJoin = ves.filter(e => e.kind === 'join').length;
+        const bd = Edging.blankDims(p);
+        const parts = [];
+        if (nExp) parts.push(`${nExp}边外露`);
+        if (nJoin) parts.push(`${nJoin}边拼接`);
+        edgeSummary = parts.length ? parts.join('·') : '不处理';
+        edgeSummary += ` 坯${fmtNum(bd.bw)}×${fmtNum(bd.bh)}`;
+        if (!(bd.bw > 0 && bd.bh > 0) || Edging.partIssues(p).length) edgeCls = ' edge-warn';
+      }
       tr.innerHTML = `
         <td><input type="text" data-k="name" value="${esc(p.name)}"></td>
         <td><input type="number" data-k="width" value="${p.width}" min="1" style="width:52px"></td>
@@ -66,6 +81,7 @@ const UI = {
           <option value="horizontal"${p.grain === 'horizontal' ? ' selected' : ''}>横向</option>
           <option value="vertical"${p.grain === 'vertical' ? ' selected' : ''}>纵向</option>
         </select></td>
+        <td><button class="edge-btn${edgeCls}" title="编辑四边封边（外露/拼接/不处理、材料、厚度、修边余量）">${edgeSummary}</button></td>
         <td><button class="tol-btn" title="正反面要求 / 允许缺陷等级 / 容许区">${faceTxt}·${tol}</button></td>
         <td><button class="del-btn" title="删除">✕</button></td>`;
       tr.querySelectorAll('input,select').forEach(inp => {
@@ -78,6 +94,7 @@ const UI = {
           else renderAll();
         });
       });
+      tr.querySelector('.edge-btn').addEventListener('click', () => EdgeUI.openPart(p));
       tr.querySelector('.tol-btn').addEventListener('click', () => PartTol.openModal(p, i));
       tr.querySelector('.del-btn').addEventListener('click', () => {
         App.parts.splice(i, 1);
@@ -188,14 +205,45 @@ const UI = {
     const lay = App.layout();
     const sheetOpts = lay.sheets.map((si, i) =>
       `<option value="${i}"${i === found.sheetIndex ? ' selected' : ''}>${esc(si.sheetId)} ${esc(si.name || '')} #${si.instance + 1}</option>`).join('');
+    // 封边四边计算过程（随旋转换向）
+    let edgeHtml = '';
+    if (pd && typeof Edging !== 'undefined') {
+      const rows = Edging.visualEdges(pd, !!p.rotated).map((e) => {
+        const comp = Edging.edgeComp(e);
+        const cls = e.kind === 'exposed' ? 'edge-calc-exposed'
+          : e.kind === 'join' ? 'edge-calc-join' : '';
+        const detail = e.kind === 'exposed'
+          ? `${esc(e.material || '未填材料')} · ${fmtNum(e.thickness)}mm · 余量${fmtNum(e.trim)}`
+          : e.kind === 'join' ? '拼接（不封边）' : '不处理';
+        return `<tr class="${cls}"><td>${({ top: '上', right: '右', bottom: '下', left: '左' })[e.key]}</td>
+          <td>${Edging.KIND_LABELS[e.kind]}${p.rotated ? ` <span class="hint">(原${({ top: '上', right: '右', bottom: '下', left: '左' })[e.canonical]})</span>` : ''}</td>
+          <td>${detail}</td><td>${fmtNum(comp)}</td></tr>`;
+      }).join('');
+      const bd0 = Edging.blankDims(pd);
+      const prNow = Edging.productRect(p, pd);
+      edgeHtml = `
+        <div class="row sel-edge-row"><label>封边四边</label>
+          <span class="hint">点选方向随零件旋转换向；补偿=−厚度+修边余量</span>
+          <button id="sel-edge-edit" class="mini-btn">编辑四边</button></div>
+        <table class="sel-edge-table">
+          <thead><tr><th>外形边</th><th>类型</th><th>材料/厚度/余量</th><th>补偿</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        <div class="row sel-edge-sum">
+          成品 ${fmtNum(p.rotated ? bd0.ph : bd0.pw)}×${fmtNum(p.rotated ? bd0.pw : bd0.ph)}
+          → 毛坯 <b>${fmtNum(p.w)}×${fmtNum(p.h)} mm</b>
+          <span class="hint">（未旋转毛坯 ${fmtNum(bd0.bw)}×${fmtNum(bd0.bh)}）</span>
+        </div>`;
+    }
     body.innerHTML = `
       <div class="row"><label>零件</label><b>${esc(uid)}</b>&nbsp;${pd ? esc(pd.name) : ''}</div>
-      <div class="row"><label>尺寸</label><span>${fmtNum(p.w)} × ${fmtNum(p.h)} mm${p.rotated ? '（已旋转）' : ''}</span></div>
+      <div class="row"><label>尺寸</label><span>毛坯 ${fmtNum(p.w)} × ${fmtNum(p.h)} mm${p.rotated ? '（已旋转）' : ''}</span></div>
+      ${pd ? `<div class="row"><label>成品</label><span>${fmtNum(prNow.w)} × ${fmtNum(prNow.h)} mm（排样按毛坯、接缝按成品）</span></div>` : ''}
       <div class="row"><label>位置 X</label><input id="sel-x" type="number" step="1" value="${p.x}"></div>
       <div class="row"><label>位置 Y</label><input id="sel-y" type="number" step="1" value="${p.y}"></div>
       <div class="row"><label>所在板</label><select id="sel-sheet">${sheetOpts}</select></div>
       <div class="row"><label>锁定</label><input id="sel-lock" type="checkbox"${p.locked ? ' checked' : ''}></div>
       <div class="row"><label>拼纹组</label><span id="sel-grain"></span></div>
+      ${edgeHtml}
       ${pd ? `<div class="row"><label>容缺</label><span class="hint">${
         { any: '正反面均可', front: '正面须无缺陷', back: '反面须无缺陷', both: '双面均须无缺陷' }[pd.faceReq || 'any']
       } · ${(+pd.allowGrade || 0) ? `容许≤${pd.allowGrade}级` : '不容许缺陷'} · 容许区 ${(pd.allowZones || []).length} 处
@@ -222,6 +270,8 @@ const UI = {
       renderAll();
     });
     body.querySelector('#sel-lock').addEventListener('change', () => Main.toggleLock());
+    const edgeBtn = body.querySelector('#sel-edge-edit');
+    if (edgeBtn) edgeBtn.addEventListener('click', () => EdgeUI.openPart(pd));
     this.renderSelGrain(uid);
     body.querySelector('#sel-rotate').addEventListener('click', () => Main.rotateSelected());
     body.querySelector('#sel-delete').addEventListener('click', () => Main.deleteSelected());
@@ -327,6 +377,7 @@ const UI = {
       const li = document.createElement('li');
       if (m.code === 'spacing') li.className = 'warn';
       if (m.code === 'grain' || m.code === 'size' || m.code === 'nodef') li.className = 'info';
+      if (m.code === 'edge') li.className = 'edge-msg';
       if (m.code === 'grainmatch') li.className = 'grain-msg';
       if (m.code === 'defect' || m.code === 'defout') li.className = 'defect-msg';
       li.textContent = m.msg;
@@ -334,6 +385,9 @@ const UI = {
       li.addEventListener('click', () => {
         if (m.loc && (m.loc.type === 'defect' || m.loc.type === 'partdefect')) {
           UI.locateDefect(m.loc);
+        } else if (m.loc && m.loc.type === 'edge') {
+          const pd = App.partDef(m.loc.partId);
+          if (pd) EdgeUI.openPart(pd, m.loc.edge);
         } else if (m.loc && m.loc.type === 'seam') {
           if (typeof Defects !== 'undefined') Defects.focusSheet(m.loc.sheetIndex);
           App.selected = m.loc.to;

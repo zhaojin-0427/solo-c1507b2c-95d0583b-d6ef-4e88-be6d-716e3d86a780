@@ -397,6 +397,7 @@ const Canvas = {
         const off = this.sheetOffsets[found.sheetIndex];
         this.drag = {
           uid, w: found.placement.w, h: found.placement.h,
+          rotated: !!found.placement.rotated,
           startX: wpt.x, startY: wpt.y,
           origWorldX: off.x + found.placement.x,
           origWorldY: off.y + found.placement.y,
@@ -480,7 +481,13 @@ const Canvas = {
     const grp = Grain.groupOf(drag.uid);
     if (!grp || !lay || tIdx < 0) return;
     const off = this.sheetOffsets[tIdx];
-    const fakeCur = { uid: drag.uid, x: worldX - off.x, y: worldY - off.y, w: drag.w, h: drag.h };
+    const fakePd = App.uidPart(drag.uid);
+    const fakeCur = {
+      uid: drag.uid, partId: String(drag.uid).split('#')[0],
+      x: worldX - off.x, y: worldY - off.y, w: drag.w, h: drag.h,
+      rotated: drag.rotated || false,
+    };
+    if (fakePd) fakeCur.product = Edging.productGeom(fakePd, !!fakeCur.rotated);
     const sInfoCur = Grain.sheetInfo(lay, tIdx);
     const mi = grp.members.indexOf(drag.uid);
     const axis = grp.dir === 'h' ? 'x' : 'y';

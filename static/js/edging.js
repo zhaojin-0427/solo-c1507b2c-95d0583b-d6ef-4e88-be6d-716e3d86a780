@@ -14,8 +14,9 @@ const Edging = {
   KEYS: ['top', 'right', 'bottom', 'left'],
   LABELS: { top: '上边', right: '右边', bottom: '下边', left: '左边' },
   KIND_LABELS: { exposed: '外露', join: '拼接', none: '不处理' },
-  // canonical → visual（视觉顺时针 90°）
-  ROT_MAP: { top: 'right', right: 'bottom', bottom: 'left', left: 'top' },
+  // canonical → visual（视觉顺时针 90°，与后端 visual_edges 一致）：
+  // top→left, right→top, bottom→right, left→bottom
+  ROT_MAP: { top: 'left', right: 'top', bottom: 'right', left: 'bottom' },
 
   edge(p, key) {
     const e = ((p && p.edges) || {})[key];
@@ -74,14 +75,15 @@ const Edging = {
   },
   canonicalKey(visual, rotated) {
     if (!rotated) return visual;
-    const inv = { top: 'right', right: 'bottom', bottom: 'left', left: 'top' };
-    return inv[visual];
+    // visual→canonical：top→right, right→bottom, bottom→left, left→top
+    return { top: 'right', right: 'bottom', bottom: 'left', left: 'top' }[visual];
   },
 
   /* 外形四边（按 top,right,bottom,left）；每项附 canonical 原边名与 banded */
   visualEdges(p, rotated) {
+    // 外形 top,right,bottom,left 分别来自哪个 canonical 边
     const order = rotated
-      ? ['right', 'bottom', 'left', 'top']   // visual top,right,bottom,left 对应的 canonical
+      ? ['right', 'bottom', 'left', 'top']
       : ['top', 'right', 'bottom', 'left'];
     return this.KEYS.map((vk, i) => {
       const ck = order[i];
@@ -90,13 +92,15 @@ const Edging = {
     });
   },
 
-  /* 放置方向上的成品在毛坯外形坐标中的几何 {w,h,ox,oy}（ox/oy 可为负=封边条悬出）。
+  /* 放置方向上的成品在毛坯外形坐标中的几何 {w,h,ox,oy}（ox/oy 可为负=成品悬出毛坯，
+     即封边条超出毛坯）。
      未旋转：成品 = 毛坯平移 comp.left/comp.top；
-     旋转：canonical 左/上 → visual 顶，成品占据外形 [0,ph]×[0,pw]。 */
+     旋转（视觉顺时针）：canonical 下封边→visual 左悬出、左封边→visual 上悬出，
+     成品偏移 (comp.bottom, comp.left)。 */
   productGeom(p, rotated) {
     const { bw, bh, comp, pw, ph } = this.blankDims(p);
     if (!rotated) return { w: pw, h: ph, ox: comp.left, oy: comp.top, blankW: bw, blankH: bh };
-    return { w: ph, h: pw, ox: 0, oy: 0, blankW: bh, blankH: bw };
+    return { w: ph, h: pw, ox: comp.bottom, oy: comp.left, blankW: bh, blankH: bw };
   },
 
   /* 放置记录 → 成品外形（画布绝对坐标，单位 mm）。
@@ -122,16 +126,26 @@ const Edging = {
     return { w: p.w, h: p.h };
   },
 
-  /* 定义级工序核对：毛坯非正 / 外露边未封 / 拼接边误封。
+  /* 定义级工序核对：毛坯非正（指出造成超扣的具体边）/ 外露边未封 / 拼接边误封。
      返回 [{code, partId, edge(canonical), msg}] */
   partIssues(p) {
     const issues = [];
     const { bw, bh } = this.blankDims(p);
     const name = p.name || p.id;
     if (!(bw > this.EPS) || !(bh > this.EPS)) {
+      const culprits = [];
+      (['left', 'right']).forEach(k => {
+        const c = this.edgeComp(this.edge(p, k));
+        if (c < -this.EPS) culprits.push(`${this.LABELS[k]} ${fmtNum(c)}mm`);
+      });
+      (['top', 'bottom']).forEach(k => {
+        const c = this.edgeComp(this.edge(p, k));
+        if (c < -this.EPS) culprits.push(`${this.LABELS[k]} ${fmtNum(c)}mm`);
+      });
       issues.push({ code: 'blanknonpositive', partId: p.id, edge: null,
         msg: `${p.id}（${name}）封边补偿后毛坯尺寸为 ${fmtNum(bw)}×${fmtNum(bh)}mm，` +
-             `非正值无法下料（请减小封边厚度或修改成品尺寸）` });
+             `非正值无法下料（成品 ${fmtNum(p.width)}×${fmtNum(p.height)}mm；` +
+             `超扣边：${culprits.join('、') || '无'}，请减小封边厚度或增大成品尺寸）` });
     }
     this.KEYS.forEach((k) => {
       const e = this.edge(p, k);
