@@ -1,0 +1,244 @@
+/* 全局状态与撤销/重做 */
+window.App = {
+  settings: { kerf: 3, margin: 5, spacing: 2 },
+  sheets: [],        // 原料板定义 [{id,name,width,height,grain,quantity,grainPeriod,grainBase:{x,y}}]
+  parts: [],         // 零件定义 [{id,name,width,height,quantity,rotatable,grain,faceReq,allowGrade,allowZones}]
+  defects: {},       // 板面缺陷（随板材实例）：{ 'S1#0': [{id,type,grade,face,clearance,shape,points:[{x,y}]}] }
+  grainGroups: [],   // 拼纹对花组定义 [{id,dir:'h'|'v',productGap,tolerance,sameSheet,members:[uid]}]
+  layouts: [],       // 服务端返回的多个方案
+  active: 0,         // 当前方案下标
+  selected: null,    // 选中零件 uid
+  selectedDefect: null,  // 选中缺陷 {key, id}
+  defectMode: null,  // 缺陷绘制模式：'rect' | 'poly' | null
+  placeMode: null,   // 待手动放置的未放置零件 uid
+  history: [],
+  hIndex: -1,
+  violations: { vmap: new Map(), dmap: new Map(), messages: [], grainSeams: [], grainGroups: [] },
+  projectId: null,
+  view: { x: -100, y: -120, w: 2800, h: 1800 },  // 画布视口（世界坐标=毫米）
+  cutOpen: false,      // 裁切工序演练面板开关
+  cutplan: null,       // 当前排样签名对应的工序状态（切法覆盖/步骤顺序/播放进度）
+  cutplanData: null,   // 工序分析结果缓存（派生数据，不随项目保存）
+  _cutStates: {},      // 各排样签名的工序状态缓存（切换方案不丢自定义）
+};
+
+App.layout = function () { return App.layouts[App.active] || null; };
+
+App.partDef = function (partId) { return App.parts.find(p => p.id === partId) || null; };
+App.sheetDef = function (sheetId) { return App.sheets.find(s => s.id === sheetId) || null; };
+App.uidPart = function (uid) { return App.partDef(String(uid).split('#')[0]); };
+
+/* ---- 拼纹对花组 ---- */
+App.groupOf = function (uid) {
+  return App.grainGroups.find(g => g.members.includes(uid)) || null;
+};
+App.nextGroupId = function () {
+  let n = 1;
+  while (App.grainGroups.some(g => g.id === 'G' + n)) n++;
+  return 'G' + n;
+};
+/* 一个 uid 只属于一个组：加入新组时从旧组移除 */
+App.setGroupMembership = function (uid, gid) {
+  App.grainGroups.forEach(g => {
+    if (g.id !== gid) g.members = g.members.filter(u => u !== uid);
+  });
+  const g = App.grainGroups.find(x => x.id === gid);
+  if (g && !g.members.includes(uid)) g.members.push(uid);
+};
+App.removeFromGroup = function (uid) {
+  App.grainGroups.forEach(g => { g.members = g.members.filter(u => u !== uid); });
+};
+App.cleanGroups = function (validUids) {
+  /* 数量/定义变更后清理失效成员与空组 */
+  App.grainGroups.forEach(g => { g.members = g.members.filter(u => validUids.has(u)); });
+  App.grainGroups = App.grainGroups.filter(g => g.members.length);
+};
+/* 所有零件实例 uid（按定义展开） */
+App.allInstanceUids = function () {
+  const out = [];
+  App.parts.forEach(p => {
+    const q = Math.max(0, +p.quantity || 0);
+    for (let i = 1; i <= q; i++) out.push(`${p.id}#${i}`);
+  });
+  return out;
+};
+
+/* 板材实例缺陷 */
+App.defectKey = function (sheetId, instance) { return `${sheetId}#${instance}`; };
+App.defectsOn = function (sheetId, instance) {
+  return App.defects[App.defectKey(sheetId, instance)] || [];
+};
+App.findDefect = function (key, id) {
+  const list = App.defects[key] || [];
+  return { list, defect: list.find(d => d.id === id) || null };
+};
+
+App.findPlacement = function (uid) {
+  const lay = App.layout();
+  if (!lay) return null;
+  for (let si = 0; si < lay.sheets.length; si++) {
+    const idx = lay.sheets[si].placements.findIndex(p => p.uid === uid);
+    if (idx >= 0) return { sheetIndex: si, partIndex: idx, placement: lay.sheets[si].placements[idx] };
+  }
+  return null;
+};
+
+/* ---- 撤销 / 重做（快照式） ----
+   约定：pushHistory() 在每次变更【之后】调用，压入变更后的新状态，
+   保证 history[hIndex] 始终等于当前状态，撤销/重做逐步移动指针。
+   快照含 layouts（零件放置）与 defects（板面缺陷）两类可编辑几何。 */
+App.snapshot = function () {
+  return JSON.stringify({
+    layouts: App.layouts, active: App.active,
+    defects: App.defects, parts: App.parts,
+    grainGroups: App.grainGroups,
+  });
+};
+App.restore = function (snap) {
+  const o = JSON.parse(snap);
+  App.layouts = o.layouts;
+  App.active = Math.min(o.active, o.layouts.length - 1);
+  if (App.active < 0) App.active = 0;
+  App.defects = o.defects || {};
+  if (o.parts) App.parts = o.parts;   // 容许区编辑也入栈
+  if (o.grainGroups) App.grainGroups = o.grainGroups;
+  App.selectedDefect = null;
+};
+App.pushHistory = function () {
+  App.history = App.history.slice(0, App.hIndex + 1);  // 丢弃重做分支
+  App.history.push(App.snapshot());
+  if (App.history.length > 100) App.history.shift();
+  App.hIndex = App.history.length - 1;
+};
+App.resetHistory = function () {
+  App.history = [];
+  App.hIndex = -1;
+  App.pushHistory();
+};
+App.undo = function () {
+  if (App.hIndex > 0) {
+    App.hIndex--;
+    App.restore(App.history[App.hIndex]);
+    App.selected = null;
+    renderAll();
+  }
+};
+App.redo = function () {
+  if (App.hIndex < App.history.length - 1) {
+    App.hIndex++;
+    App.restore(App.history[App.hIndex]);
+    App.selected = null;
+    renderAll();
+  }
+};
+
+/* ---- 小工具 ---- */
+function fmtNum(n) {
+  const v = Math.round(+n * 10) / 10;
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+function fmtArea(mm2) {
+  if (mm2 >= 1e6) return (mm2 / 1e6).toFixed(3) + ' m²';
+  return Math.round(mm2).toLocaleString() + ' mm²';
+}
+function fmtPct(x) { return (x * 100).toFixed(1) + '%'; }
+function colorFor(id) {
+  let h = 0;
+  for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return `hsl(${h}, 60%, 74%)`;
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+let _toastTimer = null;
+function toast(msg, ms = 2600) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+/* ---- 方案统计实时重算 ----
+   与后端 nesting.py 的估算口径一致：切割数 = 递归贯通切割 + 修边；
+   利用率/废料按"有零件的板材"面积计算。任何本地编辑（删除、拖动、
+   旋转、手动放置、撤销/重做）后由 renderAll 调用，保证方案标签、
+   状态栏与打印摘要一致。 */
+function guillotineCuts(rects) {
+  if (rects.length <= 1) return 0;
+  const EPS = 1e-6;
+  const xs = [...new Set(rects.map(r => Math.round((r.x + r.w) * 1e6) / 1e6))].sort((a, b) => a - b);
+  for (const c of xs) {
+    const L = rects.filter(r => r.x + r.w <= c + EPS);
+    const R = rects.filter(r => r.x >= c - EPS);
+    if (L.length && R.length && L.length + R.length === rects.length)
+      return 1 + guillotineCuts(L) + guillotineCuts(R);
+  }
+  const ys = [...new Set(rects.map(r => Math.round((r.y + r.h) * 1e6) / 1e6))].sort((a, b) => a - b);
+  for (const c of ys) {
+    const T = rects.filter(r => r.y + r.h <= c + EPS);
+    const B = rects.filter(r => r.y >= c - EPS);
+    if (T.length && B.length && T.length + B.length === rects.length)
+      return 1 + guillotineCuts(T) + guillotineCuts(B);
+  }
+  return rects.length;  // 非贯通区域按零件数估算
+}
+
+function recomputeLayoutStats(lay) {
+  if (!lay) return;
+  const EPS = 1e-6;
+  const m = +App.settings.margin || 0;
+  let placedCount = 0, placedArea = 0, usedSheets = 0, usedArea = 0, cuts = 0;
+  let qualified = 0, conflicts = 0, scrap = 0;
+  lay.sheets.forEach((si) => {
+    const def = App.sheetDef(si.sheetId) || si;
+    const W = +def.width, H = +def.height;
+    const ps = si.placements;
+    placedCount += ps.length;
+    ps.forEach(p => { placedArea += p.w * p.h; });
+    const defects = (typeof Defects !== 'undefined')
+      ? App.defectsOn(si.sheetId, si.instance) : [];
+    ps.forEach((p) => {
+      const pd = App.uidPart(p.uid);
+      if (pd) {
+        const hit = Defects.blockingDefect(p, pd, defects);
+        if (hit) conflicts++; else qualified++;
+      }
+    });
+    if (!ps.length) return;
+    usedSheets++;
+    usedArea += W * H;
+    // 避让碎料只统计方案实际使用的板材（未使用的缺陷板不计入）
+    defects.forEach(d => {
+      scrap += Defects.expandedArea(d, m, W - 2 * m, H - 2 * m);
+    });
+    cuts += guillotineCuts(ps);
+    const minx = Math.min(...ps.map(p => p.x));
+    const miny = Math.min(...ps.map(p => p.y));
+    const maxx = Math.max(...ps.map(p => p.x + p.w));
+    const maxy = Math.max(...ps.map(p => p.y + p.h));
+    // 修边：零件未贴到可用区域边缘的每一边修一次
+    cuts += [minx > m + EPS, miny > m + EPS,
+             maxx < W - m - EPS, maxy < H - m - EPS].filter(Boolean).length;
+  });
+  lay.stats = lay.stats || {};
+  lay.stats.placedCount = placedCount;
+  lay.stats.unplacedCount = lay.unplaced.length;
+  lay.stats.usedSheets = usedSheets;
+  lay.stats.totalSheets = lay.sheets.length;
+  lay.stats.utilization = usedArea ? placedArea / usedArea : 0;
+  lay.stats.waste = usedArea - placedArea;
+  lay.stats.cuts = cuts;
+  lay.stats.qualifiedCount = qualified;
+  lay.stats.defectConflictCount = conflicts;
+  lay.stats.defectScrap = scrap;
+  // 拼纹组实时统计（与后端 pack 输出同口径）
+  if (typeof Grain !== 'undefined') {
+    const ev = Grain.evaluate(lay);
+    lay.stats.groupTotal = ev.totalGroups;
+    lay.stats.groupComplete = ev.completeCount;
+    lay.stats.maxSeamOffset = ev.maxOffset;
+  }
+}
