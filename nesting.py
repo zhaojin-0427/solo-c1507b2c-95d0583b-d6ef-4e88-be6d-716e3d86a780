@@ -753,17 +753,20 @@ def _rect_ok(st, x, y, w, h, inst, gap, extra):
     return True
 
 
-def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin):
+def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin, inst=None):
     """沿拼链生成候选链坐标（可用区域坐标），兼顾贴边/绕障与对花周期。
 
     返回去重升序的候选列表。相位合格的理想间距为 pgap + k·T（同板，
-    错花量 = wrap(板上净距-成品间隙)）；另加入障碍右缘+gap 用于绕障。
+    错花量 = wrap(板上净距-成品间隙)）；另加入障碍右缘+gap 与缺陷外扩角点用于绕障。
     """
     if prev is None:
         cands = {0.0}
         for r in st['placed'] + extra:
             edge = (r['x'] + r['w']) if chain == 'x' else (r['y'] + r['h'])
             cands.add(max(0.0, edge + gap))
+        if inst is not None:
+            for cx, cy in _defect_candidates(inst, st['defects']):
+                cands.add(max(0.0, (cx if chain == 'x' else cy)))
         return sorted(cands)
     edge = (prev['x'] + prev['w']) if chain == 'x' else (prev['y'] + prev['h'])
     cands = set()
@@ -782,18 +785,27 @@ def _chain_cands(chain, st, extra, start, gap, pgap, prev, period, tol, margin):
         c = e2 + gap
         if c >= edge + gap - EPS:
             cands.add(c)
+    # 缺陷外扩角点/顶点：沿链方向绕行位置
+    if inst is not None:
+        for cx, cy in _defect_candidates(inst, st['defects']):
+            c = cx if chain == 'x' else cy
+            if c >= edge + gap - EPS:
+                cands.add(max(0.0, c))
     return sorted(c for c in cands if c >= edge + gap - EPS)
 
 
-def _band_coords(chain, st, extra, gap, prev, first_band):
-    """候选带坐标（与拼链垂直方向）：承接上一成员的带，或新带贴边/绕障。"""
+def _band_coords(chain, st, extra, gap, prev, first_band, inst=None):
+    """候选带坐标（与拼链垂直方向）：承接上一成员的带，或新带贴边/绕障/绕缺陷。"""
     if prev is not None:
         band = prev['y'] if chain == 'x' else prev['x']
         cands = {band}
-        # 该带被占时枚举带起点
+        # 同带被占/被缺陷挡时，枚举带起点：障碍外缘 +gap
         for r in st['placed'] + extra:
             e2 = (r['y'] + r['h']) if chain == 'x' else (r['x'] + r['w'])
             cands.add(max(0.0, e2 + gap))
+        if inst is not None:
+            for cx, cy in _defect_candidates(inst, st['defects']):
+                cands.add(max(0.0, (cy if chain == 'x' else cx)))
         return sorted(cands)
     if first_band is not None:
         return [first_band]
@@ -801,6 +813,9 @@ def _band_coords(chain, st, extra, gap, prev, first_band):
     for r in st['placed'] + extra:
         e2 = (r['y'] + r['h']) if chain == 'x' else (r['x'] + r['w'])
         cands.add(max(0.0, e2 + gap))
+    if inst is not None:
+        for cx, cy in _defect_candidates(inst, st['defects']):
+            cands.add(max(0.0, (cy if chain == 'x' else cx)))
     return sorted(cands)
 
 
@@ -882,16 +897,18 @@ def place_group(group, insts_by_uid, states, gap, margin):
         if chain_len > U + EPS or cross_size > V + EPS:
             return None
 
-        # 枚举首成员带坐标（贴 0 / 已有零件外缘 +gap）
-        first_bands = _band_coords(chain, st, [], gap, None, None)
+        # 枚举首成员带坐标（贴 0 / 已有零件外缘 +gap / 缺陷外扩角点）
+        first_bands = _band_coords(chain, st, [], gap, None, None, members[0])
         for fb in first_bands:
             recs, extra = [], []
             ok = True
             for k, (inst, (w, h, rot)) in enumerate(zip(members, geoms)):
                 prev = recs[-1] if recs else None
                 period = T if longitudinal else 0
-                cc = _chain_cands(chain, st, extra, 0.0, gap, pgap, prev, period, tol, margin)
-                bc = [fb] if prev is None else _band_coords(chain, st, extra, gap, prev, fb)
+                cc = _chain_cands(chain, st, extra, 0.0, gap, pgap, prev,
+                                  period, tol, margin, inst)
+                bc = [fb] if prev is None else _band_coords(
+                    chain, st, extra, gap, prev, fb, inst)
                 found = None
                 for c in cc:
                     for b in bc:
@@ -932,97 +949,103 @@ def place_group(group, insts_by_uid, states, gap, margin):
             blockers[inst['uid']] = [why_text, '拼纹组要求全部取自同一张板']
         return {'ok': False, 'blockers': blockers, 'why': 'sameSheet'}
 
-    # 允许跨板：沿链逐件 first-fit。两轮策略——先追求接缝全部合格，
-    # 再退而求其次尽量放全（无法对齐的接缝标 unknown，由分析阶段报告）。
-    def attempt_split(allow_unknown):
-        recs, extras = [], {}
-        for inst in members:
-            prev = recs[-1] if recs else None
-            fallback_pos = None
-            placed_here = False
-            for st in compatible:
-                geom = _group_geom(inst, st)
-                if geom is None:
-                    continue
-                w, h, rot = geom
-                gax = _grain_axis(st, chain)
-                T = st['def'].get('grainPeriod', 0) or 0
-                longitudinal = (gax == chain)
-                if prev is not None and longitudinal and T <= EPS and \
-                        (st['def'].get('grain') or 'none') != 'none':
-                    if not allow_unknown:
+    # 允许跨板：沿链逐件 first-fit，每步可换板。相位限制（含跨板周期不一致导致
+    # 的 unknown 接缝）是硬约束：找不到接缝全部合格的摆位即整组原子失败。
+    recs, extras = [], {}
+    fail_idx = None
+    fail_causes = []   # 受阻成员触发的具体限制（去重）
+    for inst in members:
+        prev = recs[-1] if recs else None
+        placed_here = False
+        causes = set()
+        for st in compatible:
+            geom = _group_geom(inst, st)
+            if geom is None:
+                continue
+            w, h, rot = geom
+            gax = _grain_axis(st, chain)
+            T = st['def'].get('grainPeriod', 0) or 0
+            longitudinal = (gax == chain)
+            extra = extras.get(id(st), [])
+            if prev is not None and prev['state'] is st:
+                start = ((prev['x'] + prev['w']) if chain == 'x'
+                         else (prev['y'] + prev['h'])) + gap
+            else:
+                start = 0.0
+            period = T if (prev is not None and longitudinal) else 0
+            cc = _chain_cands(chain, st, extra, start, gap, pgap,
+                              prev if prev is not None and prev['state'] is st else None,
+                              period, tol, margin, inst)
+            bc = _band_coords(chain, st, extra, gap,
+                              prev if prev is not None and prev['state'] is st else None,
+                              prev['y' if chain == 'x' else 'x'] if prev is not None else None,
+                              inst)
+            geom_feasible = False
+            seam_bad = None
+            seam_unknown = None
+            for c in cc:
+                for b in bc:
+                    x, y = (c, b) if chain == 'x' else (b, c)
+                    if not _rect_ok(st, x, y, w, h, inst, gap, extra):
                         continue
-                extra = extras.get(id(st), [])
-                if prev is not None and prev['state'] is st:
-                    start = ((prev['x'] + prev['w']) if chain == 'x'
-                             else (prev['y'] + prev['h'])) + gap
-                else:
-                    start = 0.0
-                period = T if (prev is not None and longitudinal) else 0
-                cc = _chain_cands(chain, st, extra, start, gap, pgap,
-                                  prev if prev is not None and prev['state'] is st else None,
-                                  period, tol, margin)
-                bc = _band_coords(chain, st, extra, gap,
-                                  prev if prev is not None and prev['state'] is st else None,
-                                  prev['y' if chain == 'x' else 'x'] if prev is not None else None)
-                first_pos = None
-                for c in cc:
-                    for b in bc:
-                        x, y = (c, b) if chain == 'x' else (b, c)
-                        if not _rect_ok(st, x, y, w, h, inst, gap, extra):
+                    geom_feasible = True
+                    if prev is not None:
+                        seam = _seam_for_records(prev, {'x': x, 'y': y, 'w': w, 'h': h},
+                                                 chain, group, prev['state'], st, margin)
+                        if seam['status'] == 'unknown':
+                            seam_unknown = seam
                             continue
-                        if first_pos is None:
-                            first_pos = (st, x, y, w, h, rot)
-                        if prev is not None:
-                            seam = _seam_for_records(prev, {'x': x, 'y': y, 'w': w, 'h': h},
-                                                     chain, group, prev['state'], st, margin)
-                            if not seam_qualified(seam, tol):
-                                if not (allow_unknown and seam['status'] == 'unknown'):
-                                    continue
-                        rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
-                               'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
-                        recs.append(rec)
-                        extras.setdefault(id(st), []).append(rec)
-                        placed_here = True
-                        break
-                    if placed_here:
-                        break
+                        if not seam_qualified(seam, tol):
+                            seam_bad = seam
+                            continue
+                    rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
+                           'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
+                    recs.append(rec)
+                    extras.setdefault(id(st), []).append(rec)
+                    placed_here = True
+                    break
                 if placed_here:
                     break
-                if first_pos is not None and fallback_pos is None and allow_unknown:
-                    # 纵向缺周期等 unknown 情形：记住首个几何可行位置兜底
-                    if prev is None or (longitudinal and T <= EPS):
-                        fallback_pos = first_pos
-            if not placed_here and fallback_pos is not None:
-                st, x, y, w, h, rot = fallback_pos
-                rec = {'uid': inst['uid'], 'inst': inst, 'state': st,
-                       'x': x, 'y': y, 'w': w, 'h': h, 'rot': rot}
-                recs.append(rec)
-                extras.setdefault(id(st), []).append(rec)
-                placed_here = True
-            if not placed_here:
-                return recs
-        return recs
+            if placed_here:
+                break
+            # 该板上的受阻原因
+            if prev is not None and longitudinal and T <= EPS and \
+                    (st['def'].get('grain') or 'none') != 'none':
+                causes.add(
+                    f"板材 {st['def']['sheetId']} #{st['def']['instance'] + 1} 未记录纹理重复周期，"
+                    "沿纹理方向接缝相位无法核算")
+            if seam_unknown is not None:
+                causes.add(
+                    f"跨板接缝相位无法核算（{seam_unknown['reason']}）："
+                    f"{prev['state']['def']['sheetId']} #{prev['state']['def']['instance'] + 1}"
+                    f" → {st['def']['sheetId']} #{st['def']['instance'] + 1}")
+            if seam_bad is not None:
+                causes.add(
+                    f"接缝错花量 {seam_bad['offset']:g}mm 超过可接受值 {tol:g}mm（"
+                    f"{prev['state']['def']['sheetId']} #{prev['state']['def']['instance'] + 1}"
+                    f" → {st['def']['sheetId']} #{st['def']['instance'] + 1}）")
+            if not geom_feasible:
+                causes.add(
+                    f"板材 {st['def']['sheetId']} #{st['def']['instance'] + 1} "
+                    "剩余空间/锯缝间距/缺陷避让限制下无可行位置")
+        if not placed_here:
+            fail_idx = len(recs)
+            fail_causes = list(causes)
+            break
 
-    recs = attempt_split(allow_unknown=False)
-    if len(recs) != len(members):
-        recs = attempt_split(allow_unknown=True)
-
-    if len(recs) == len(members):
+    if fail_idx is None and len(recs) == len(members):
         return {'ok': True, 'records': recs}
 
-    phase_failed = len(recs) > 0
-    # 原子失败：汇总各成员受阻原因（已放/未放均列入未放置清单）
+    # 原子失败：逐成员列明其在组内角色与触发的限制
+    phase_failed = any(('相位' in c or '错花量' in c or '周期' in c) for c in fail_causes)
     for k, inst in enumerate(members):
         reasons = []
-        if k == len(recs):
-            reasons.append('接缝错花量超过可接受值 %gmm（相位/周期限制）' % tol
-                           if phase_failed else
-                           '板材剩余空间、锯缝间距或缺陷避让限制下无法继续放置')
+        if k < fail_idx:
+            reasons.append('拼纹组未能整体落板：下游成员受阻（组为原子单位，已放置成员一并撤回）')
+        elif not fail_causes:
+            reasons.append('板材剩余空间、锯缝间距或缺陷避让限制下无法放置')
         else:
-            reasons.append('整组原子排样失败：组内有成员无法落板')
-            if phase_failed:
-                reasons.append('相位（错花量）限制无法满足')
+            reasons.extend(fail_causes)
         blockers[inst['uid']] = reasons
     return {'ok': False, 'blockers': blockers,
             'why': 'phase' if phase_failed else 'space'}

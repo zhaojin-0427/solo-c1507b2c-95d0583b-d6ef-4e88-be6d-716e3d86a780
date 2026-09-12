@@ -579,7 +579,9 @@ class TestGrainMatchingGroups(unittest.TestCase):
     def test_cross_sheet_split_allowed(self):
         # 窄板：一张放不下 3 件横排；允许跨板 → 拆开且接缝按相位复核
         p = self.base(nsheets=2)
-        p["sheets"][0]["width"] = 1300
+        p["sheets"][0]["width"] = 1700
+        p["parts"][0]["width"] = 600
+        p["parts"][0]["height"] = 800
         p["grainGroups"][0]["sameSheet"] = False
         lay = generate_layouts(p)["layouts"][0]
         g = lay["grainGroups"][0]
@@ -593,14 +595,17 @@ class TestGrainMatchingGroups(unittest.TestCase):
 
     def test_same_sheet_forbidden_split_fails(self):
         p = self.base(nsheets=2)
-        p["sheets"][0]["width"] = 1300
+        p["sheets"][0]["width"] = 1700
+        p["parts"][0]["width"] = 600
+        p["parts"][0]["height"] = 800
         p["grainGroups"][0]["sameSheet"] = True
         lay = generate_layouts(p)["layouts"][0]
         self.assertEqual(lay["grainGroups"][0]["status"], "failed")
         self.assertTrue(all("同一张板" in u["reason"] for u in lay["unplaced"]))
 
     def test_mismatched_period_cross_sheet_unknown(self):
-        # 两板周期不同 → 跨板接缝 unknown，组不完整（迫使使用两张不同型号的板）
+        # 两板周期不同 → 跨板接缝 unknown 是硬限制：整组失败、成员全部列入未放置，
+        # 受阻清单写明"周期不一致"的具体限制，成员不得以散件补位。
         p = {
             "settings": {"kerf": 3, "margin": 5, "spacing": 2},
             "sheets": [
@@ -611,19 +616,76 @@ class TestGrainMatchingGroups(unittest.TestCase):
                  "grain": "vertical", "quantity": 1,
                  "grainPeriod": 300, "grainBase": {"x": 0, "y": 0}},
             ],
-            "parts": [{"id": "P1", "name": "门板", "width": 500, "height": 350,
-                       "quantity": 3, "rotatable": True, "grain": "none"}],
+            "parts": [{"id": "P1", "name": "门板", "width": 600, "height": 800,
+                       "quantity": 3, "rotatable": True, "grain": "vertical"}],
             "grainGroups": [{"id": "G1", "dir": "h", "productGap": 2, "tolerance": 2,
                              "sameSheet": False,
                              "members": ["P1#1", "P1#2", "P1#3"]}],
         }
         lay = generate_layouts(p)["layouts"][0]
         g = lay["grainGroups"][0]
-        # S1 宽 1300（可用 1290）放不下 3×500 横排 → 至少一条跨到 S2
-        used = {m["sheetId"] for m in g["members"] if m["sheetId"]}
-        self.assertIn("S2", used)
-        self.assertFalse(g["status"] == "complete" and g["unknownSeamCount"] == 0)
-        self.assertGreaterEqual(g["unknownSeamCount"], 1)
+        self.assertEqual(g["status"], "failed")
+        self.assertEqual(lay["stats"]["placedCount"], 0,
+                         "相位限制不满足时成员不得混入有效方案")
+        self.assertEqual(lay["stats"]["unplacedCount"], 3)
+        self.assertTrue(all(u.get("groupBlocked") for u in lay["unplaced"]))
+        joined = "；".join(u["reason"] for u in lay["unplaced"])
+        self.assertIn("周期不一致", joined)
+        self.assertIn("S2", joined)
+
+    def test_same_period_cross_sheet_ok(self):
+        # 两板周期相同、基点不同，窄板迫使跨板 → 接缝合格、整组完整
+        p = {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [
+                {"id": "S1", "name": "板A", "width": 2000, "height": 1220,
+                 "grain": "vertical", "quantity": 1,
+                 "grainPeriod": 240, "grainBase": {"x": 0, "y": 0}},
+                {"id": "S2", "name": "板B", "width": 2000, "height": 1220,
+                 "grain": "vertical", "quantity": 1,
+                 "grainPeriod": 240, "grainBase": {"x": 10, "y": 0}},
+            ],
+            "parts": [{"id": "P1", "name": "门板", "width": 600, "height": 800,
+                       "quantity": 3, "rotatable": True, "grain": "vertical"}],
+            "grainGroups": [{"id": "G1", "dir": "h", "productGap": 2, "tolerance": 2,
+                             "sameSheet": False,
+                             "members": ["P1#1", "P1#2", "P1#3"]}],
+        }
+        lay = generate_layouts(p)["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")
+        cross = [s for s in g["seams"] if s["fromSheet"] != s["toSheet"]]
+        self.assertTrue(cross)
+        self.assertTrue(all(s["qualified"] for s in g["seams"]))
+
+    def test_group_avoids_small_defect_at_origin(self):
+        # 左上角小缺陷（核心 40,40–110,110，外扩 20 → 禁入到 130），
+        # 整组应把首件平移到缺陷外，三件完整落板、零错花。
+        p = {
+            "settings": {"kerf": 3, "margin": 5, "spacing": 2},
+            "sheets": [{"id": "S1", "name": "纵纹板", "width": 2440, "height": 1220,
+                        "grain": "vertical", "quantity": 1,
+                        "grainPeriod": 240, "grainBase": {"x": 0, "y": 0}}],
+            "parts": [{"id": "P1", "name": "门板", "width": 500, "height": 350,
+                       "quantity": 3, "rotatable": True, "grain": "vertical",
+                       "faceReq": "front", "allowGrade": 0}],
+            "defects": {"S1#0": [{
+                "id": "D1", "type": "knot", "grade": 3, "face": "front",
+                "clearance": 20, "shape": "rect",
+                "points": [{"x": 40, "y": 40}, {"x": 110, "y": 110}]}]},
+            "grainGroups": [{"id": "G1", "dir": "h", "productGap": 2,
+                             "tolerance": 2, "sameSheet": True,
+                             "members": ["P1#1", "P1#2", "P1#3"]}],
+        }
+        lay = generate_layouts(p)["layouts"][0]
+        g = lay["grainGroups"][0]
+        self.assertEqual(g["status"], "complete")
+        self.assertEqual(lay["stats"]["unplacedCount"], 0)
+        first = sorted((q for s in lay["sheets"] for q in s["placements"]
+                        if q["groupId"] == "G1"), key=lambda q: q["memberIndex"])[0]
+        # 禁入区右缘 = 110 + 20 = 130，首件不得从 x=5 起压入
+        self.assertGreaterEqual(first["x"], 130 - 1e-6)
+        self.assertEqual(lay["stats"]["qualifiedCount"], 3)
 
     def test_group_members_are_atomic_no_loose_fill(self):
         # 整组放不下时成员不得以散件身份补位（保持整组未放置）

@@ -32,7 +32,7 @@ const Main = {
       { id: 'P3', name: '门板', width: 500, height: 350, quantity: 4, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
       { id: 'P4', name: '背板', width: 580, height: 380, quantity: 2, rotatable: true, grain: 'none', faceReq: 'back', allowGrade: 0,
         allowZones: [{ points: [{ x: 0, y: 300 }, { x: 200, y: 300 }, { x: 200, y: 380 }, { x: 0, y: 380 }] }] },
-      { id: 'P5', name: '抽屉面', width: 460, height: 200, quantity: 3, rotatable: false, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
+      { id: 'P5', name: '抽屉面', width: 460, height: 200, quantity: 3, rotatable: true, grain: 'vertical', faceReq: 'both', allowGrade: 0, allowZones: [] },
     ];
     // 拼纹对花组：柜门 4 连拼、抽屉面 3 连拼（安装次序即成员次序）
     App.grainGroups = [
