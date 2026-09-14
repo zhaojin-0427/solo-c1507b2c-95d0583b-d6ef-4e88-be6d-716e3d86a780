@@ -40,14 +40,15 @@ App.blankDef = function (pd, rotated) {
   return { w: g.blankW, h: g.blankH };
 };
 
-/* 当前方案封边批次（渲染缓存，按布局签名失效） */
+/* 当前方案封边批次（渲染缓存，按布局/封边定义/排序模式与手动次序签名失效） */
 App.edgingBatches = function () {
   const lay = this.layout();
   if (!lay || typeof Edging === 'undefined') return [];
   const sig = lay.sheets.map(s => s.placements.map(p =>
     [p.uid, Math.round(p.x), Math.round(p.y), p.rotated].join(',')).join('|'));
   const partsSig = this.parts.map(p => JSON.stringify(p.edges)).join('|');
-  const key = sig + '#' + partsSig + '#' + (this.edgingOrder ? this.edgingOrder.mode : '');
+  const orderSig = JSON.stringify(this.edgingOrder || {});
+  const key = sig + '#' + partsSig + '#' + orderSig;
   if (this._batchKey === key) return this._batchCache || [];
   this._batchKey = key;
   this._batchCache = Edging.batches(lay, (this.edgingOrder || {}).mode,

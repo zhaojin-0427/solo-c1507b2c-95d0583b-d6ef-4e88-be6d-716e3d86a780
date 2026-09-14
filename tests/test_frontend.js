@@ -977,11 +977,12 @@ section('封边：毛坯/成品换算、旋转换向、批次与接缝校验');
   near(g1.oy, -0.5, '旋转成品 oy = comp.left(-0.5)');
   near(g1.w, 400, '旋转成品宽 = 成品高');
   near(g1.blankH, 599.5, '旋转毛坯高 = 未旋毛坯宽');
-  // 旋转换向（与后端一致）：canonical 右 → visual 上、上 → visual 左、左 → visual 下
+  // 视觉顺时针旋转换向（与后端一致）：canonical 左→visual 上、上→右、右→下、下→左
   const ves = Edging.visualEdges(part, true);
-  eq(ves.find(e => e.key === 'top').canonical, 'right', '旋转：上边来自 canonical 右边');
-  eq(ves.find(e => e.key === 'left').canonical, 'top', '旋转：左边来自 canonical 上边');
-  eq(ves.find(e => e.key === 'bottom').canonical, 'left', '旋转：下边来自 canonical 左边');
+  eq(ves.find(e => e.key === 'top').canonical, 'left', '旋转：上边来自 canonical 左边');
+  eq(ves.find(e => e.key === 'right').canonical, 'top', '旋转：右边来自 canonical 上边');
+  eq(ves.find(e => e.key === 'bottom').canonical, 'right', '旋转：下边来自 canonical 右边');
+  eq(ves.find(e => e.key === 'left').canonical, 'bottom', '旋转：左边来自 canonical 下边');
 
   // 工序核对：毛坯非正指出具体边 / 外露未封 / 拼接误封
   const bad = { id: 'E9', name: '坏', width: 10, height: 10, edges: {
@@ -1087,6 +1088,103 @@ section('封边：批次合并、顺序与用量统计');
   ok(q1.join(',') === 'left,top', '段带封边方向（上、左）');
 }
 
+section('封边：缺材料边不进批次、非正毛坯定位责任边');
+{
+  // 上边外露、厚度 2 但材料为空：报错且不参与毛坯扣除/不进批次
+  const p = { id: 'M1', name: '件', width: 100, height: 100, quantity: 1, edges: {
+    top: { kind: 'exposed', material: '', thickness: 2, trim: 0 },
+    right: { kind: 'exposed', material: 'ABS', thickness: 2, trim: 0 },
+    bottom: { kind: 'none', material: '', thickness: 0, trim: 0 },
+    left: { kind: 'none', material: '', thickness: 0, trim: 0 } } };
+  Edging.ensureEdges(p);
+  const issues = Edging.partIssues(p);
+  const miss = issues.find(i => i.code === 'exposedunbanded');
+  ok(miss && miss.edge === 'top' && /未填写封边材料/.test(miss.msg), '缺材料边报错并定位到上边');
+  const d = Edging.blankDims(p);
+  near(d.bw, 98, '缺材料上边不扣宽度；右边正常扣 → 毛坯宽 98');
+  near(d.bh, 100, '缺材料上边不扣高度 → 毛坯高 100');
+  App.sheets = [{ id: 'S1', width: 500, height: 500, grain: 'none', quantity: 1 }];
+  App.layouts = [{ id: 1, sheets: [{ sheetId: 'S1', instance: 0, width: 500, height: 500, placements: [
+    { uid: 'M1#1', partId: 'M1', x: 0, y: 0, w: 98, h: 100, rotated: false, product: Edging.productGeom(p, false) },
+  ] }], unplaced: [], stats: {} }];
+  App.parts = [p]; App.active = 0;
+  const b = Edging.batches(App.layout(), 'shortFirst', {});
+  eq(b.length, 1, '仅 1 个批次（右边 ABS）');
+  eq(b[0].count, 1, '缺材料的上边未进入批次');
+  eq(b[0].segments[0].edgeVisual, 'right', '批次段为右边');
+
+  // 左边 20mm 把毛坯宽扣成 -10：责任边为左边
+  const neg = { id: 'M2', name: '小', width: 10, height: 100, quantity: 1, edges: {
+    top: { kind: 'none' }, bottom: { kind: 'none' }, right: { kind: 'none' },
+    left: { kind: 'exposed', material: 'ABS', thickness: 20, trim: 0 } } };
+  Edging.ensureEdges(neg);
+  const ni = Edging.partIssues(neg).find(i => i.code === 'blanknonpositive');
+  ok(ni && /左边/.test(ni.msg) && /-20/.test(ni.msg), '非正毛坯指出责任边（左边 -20）');
+  eq(ni.edge, 'left', 'issue.edge = left');
+}
+
+section('封边：旋转 + 补偿后容许区按成品偏移变换');
+{
+  // 成品 200×100、左封 2mm；旋转后毛坯 100×198，成品偏移 (0,-2)
+  const p = { id: 'Z1', name: '件', width: 200, height: 100, quantity: 1, edges: {
+    top: { kind: 'none' }, bottom: { kind: 'none' }, right: { kind: 'none' },
+    left: { kind: 'exposed', material: 'ABS', thickness: 2, trim: 0 } } };
+  Edging.ensureEdges(p);
+  const placement = { x: 50, y: 60, w: 100, h: 198, rotated: true, product: Edging.productGeom(p, true) };
+  near(placement.product.oy, -2, '旋转成品 oy=-2（canonical 左→visual 上）');
+  const zone = { points: [{ x: 0, y: 80 }, { x: 40, y: 80 }, { x: 40, y: 100 }, { x: 0, y: 100 }] };
+  const pts = Defects.transformZone(zone, placement, p);
+  // visual = (x+ox+ph-ly, y+oy+lx)，ph=100, oy=-2
+  near(pts[0].x, 50 + 0 + 100 - 80, '旋转容许区 p0.x 含偏移');
+  near(pts[0].y, 60 - 2 + 0, '旋转容许区 p0.y 含 oy=-2');
+  near(pts[1].y, 60 - 2 + 40, '旋转容许区 p1.y 含 oy=-2');
+  near(pts[2].x, 50 + 0 + 100 - 100, '旋转容许区 p2.x');
+  near(pts[2].y, 60 - 2 + 40, '旋转容许区 p2.y 含偏移');
+}
+
+section('封边：手动连续换序稳定且同步缓存');
+{
+  const e = (mat, th) => ({ kind: 'exposed', material: mat, thickness: th, trim: 0 });
+  const n = { kind: 'none' };
+  App.parts = [
+    { id: 'Q1', name: '长', width: 600, height: 400, quantity: 1,
+      edges: { top: e('ABS', 2), bottom: n, left: e('ABS', 2), right: n } },
+    { id: 'Q2', name: '短', width: 300, height: 200, quantity: 1,
+      edges: { top: e('ABS', 2), bottom: n, left: n, right: n } },
+  ];
+  App.parts.forEach(pp => Edging.ensureEdges(pp));
+  App.sheets = [{ id: 'S1', width: 1000, height: 1000, grain: 'none', quantity: 1 }];
+  App.layouts = [{ id: 1, sheets: [{ sheetId: 'S1', instance: 0, width: 1000, height: 1000, placements: [
+    { uid: 'Q1#1', partId: 'Q1', x: 0, y: 0, w: 596, h: 396, rotated: false },
+    { uid: 'Q2#1', partId: 'Q2', x: 0, y: 401, w: 296, h: 196, rotated: false },
+  ] }], unplaced: [], stats: {} }];
+  App.active = 0; App.edgingOrder = { mode: 'manual', orders: {} };
+  const key = App.edgingBatches()[0].key;
+  const init = Edging.batches(App.layout(), 'shortFirst', {})[0];
+  App.edgingOrder.orders[key] = init.segments.map(s => s.uid + '|' + s.edgeVisual);
+  const up = () => Edging.batches(App.layout(), 'manual', App.edgingOrder.orders)[0];
+  const ids = b0 => b0.segments.map(s => s.uid + '|' + s.edgeVisual);
+  let order = ids(up());
+  eq(order[0], 'Q2#1|top', '初始首段为短件');
+  eq(order[2], 'Q1#1|top', '初始末段为 Q1 上边(600)');
+  // 面板中连续上移同一段：每次以【当前显示顺序】为基准，把指定段与上一段交换
+  const moveUp = (arr, id) => { const i = arr.indexOf(id); const c = arr.slice(); [c[i], c[i - 1]] = [c[i - 1], c[i]]; return c; };
+  // 把短件从第 1 位下移再连续上移，验证不跳序：先把末段上移（与第 2 位交换）
+  App.edgingOrder.orders[key] = moveUp(order, order[order.length - 1]);
+  const o2 = ids(up());
+  eq(o2[1], 'Q1#1|top', '上移末段：Q1 上边到第 2 位');
+  eq(o2[2], 'Q1#1|left', '原第 2 位（左边）到末位');
+  // 连续把短件（当前仍在首位）下方的段逐次上移不会打乱：把左边从末位连续上移两次
+  App.edgingOrder.orders[key] = moveUp(o2, 'Q1#1|left');
+  const o3 = ids(up());
+  eq(o3[1], 'Q1#1|left', '左边上移 1 次到第 2 位');
+  App.edgingOrder.orders[key] = moveUp(o3, 'Q1#1|left');
+  const o4 = ids(up());
+  eq(o4[0], 'Q1#1|left', '左边连续再上移到首位（顺序稳定，不跳成无关顺序）');
+  eq(o4[2], 'Q1#1|top', '原首段短件之外的上边落到末位');
+  const cached = App.edgingBatches()[0].segments.map(s => s.uid + '|' + s.edgeVisual);
+  ok(JSON.stringify(cached) === JSON.stringify(o4), 'App.edgingBatches() 反映最新手动顺序');
+}
+
 /* ================= 结果 ================= */
-console.log(`\n${passed} 通过, ${failed} 失败`);
 process.exit(failed ? 1 : 0);

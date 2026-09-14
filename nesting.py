@@ -66,8 +66,12 @@ def _edge_raw(p, k):
 
 
 def edge_banded(e):
-    """该边是否实际封边：外露 + 封边厚度为正。"""
-    return e['kind'] == 'exposed' and e['thickness'] > EPS
+    """该边是否实际封边并可进入工序：外露 + 封边厚度为正 + 已填材料。
+
+    外露但缺材料（即使填了厚度）视为工序不完整：不计入毛坯扣除、不进入批次，
+    由 part_edge_issues 报"外露边未封（缺材料）"。
+    """
+    return e['kind'] == 'exposed' and e['thickness'] > EPS and bool(e['material'])
 
 
 def normal_edges(p):
@@ -102,10 +106,12 @@ def visual_edges(p, rotated=False):
     right → bottom，bottom → left，left → top。
     """
     e = {k: _edge_raw(p, k) for k in EDGE_KEYS}
+    # 视觉顺时针 90°（与容许区变换同口径）：canonical top→visual right、
+    # right→bottom、bottom→left、left→top
     if not rotated:
         order = ('top', 'right', 'bottom', 'left')
     else:
-        order = ('right', 'bottom', 'left', 'top')
+        order = ('left', 'top', 'right', 'bottom')
     out = []
     for vk, ck in zip(EDGE_KEYS, order):
         d = dict(e[ck])
@@ -120,8 +126,8 @@ def product_geom(p, rotated=False):
     """成品在毛坯外形坐标中的几何 {w,h,ox,oy}（毛坯局部坐标，可为负=封边条悬出）。
 
     未旋转：成品 x∈[comp.left, pw+comp.left]、y∈[comp.top, ph+comp.top]；
-    旋转 90°（视觉顺时针）：canonical 下封边→visual 左悬出、左封边→visual 上悬出，
-    成品偏移 (comp.bottom, comp.left)。
+    旋转 90°（视觉顺时针）：canonical 左→visual 上、上→visual 右、
+    右→visual 下、下→visual 左，成品偏移 (comp.bottom, comp.left)。
     """
     pw, ph = _f(p.get('width')), _f(p.get('height'))
     bw, bh, comp = blank_dims(p)
@@ -136,8 +142,8 @@ def instance_product(inst, rotated=False):
     """展开实例（已含 comp/productW/productH）→ 放置方向上的成品几何。
 
     未旋转：成品在毛坯局部 (comp.left, comp.top)（负值=成品悬出毛坯，即封边条）。
-    旋转 90°（视觉顺时针）：canonical 下封边→visual 左悬出、左封边→visual 上悬出，
-    成品原点偏移 (comp.bottom, comp.left)。
+    旋转 90°（视觉顺时针）：canonical 左→visual 上、上→visual 右、
+    右→visual 下、下→visual 左，成品偏移 (comp.bottom, comp.left)。
     """
     if not rotated:
         return {'w': inst['productW'], 'h': inst['productH'],
@@ -157,33 +163,47 @@ def prect(rec):
 
 
 def part_edge_issues(p):
-    """定义级工序核对：毛坯非正 / 外露边未封 / 拼接边误封。
+    """定义级工序核对：毛坯非正 / 外露边未封（缺厚度或缺材料）/ 拼接边误封。
     返回 [{code, edge, msg}]，edge 为 canonical 边名。"""
     issues = []
     name = p.get('name') or p.get('id')
     bw, bh, comp = blank_dims(p)
     if bw <= EPS or bh <= EPS:
-        culprits = []
-        for k in EDGE_KEYS:
-            c = comp[k]
-            if c < -EPS:
-                culprits.append(f"{EDGE_LABELS[k]} {c:g}mm")
-        issues.append({'code': 'blanknonpositive', 'edge': None,
+        # 责任边：扣除为负且 |补偿| 最大的边（宽度/高度方向分别定位）
+        def worst(axis_keys):
+            cand = [(comp[k], k) for k in axis_keys if comp[k] < -EPS]
+            return min(cand, default=None)
+        ww = worst(('left', 'right'))
+        hh = worst(('top', 'bottom'))
+        detail = []
+        if bw <= EPS and ww:
+            detail.append(f"宽度方向由{EDGE_LABELS[ww[1]]}超扣 {ww[0]:g}mm")
+        if bh <= EPS and hh:
+            detail.append(f"高度方向由{EDGE_LABELS[hh[1]]}超扣 {hh[0]:g}mm")
+        culprits = [f"{EDGE_LABELS[k]} {comp[k]:g}mm"
+                    for k in EDGE_KEYS if comp[k] < -EPS]
+        issues.append({'code': 'blanknonpositive',
+                       'edge': (ww or hh or (None, None))[1],
                        'msg': f"{p.get('id')}（{name}）封边补偿后毛坯尺寸为 "
                               f"{bw:g}×{bh:g}mm，非正值无法下料（成品 "
                               f"{_f(p.get('width')):g}×{_f(p.get('height')):g}mm；"
-                              f"超扣边：{'、'.join(culprits) if culprits else '无'}，"
-                              f"请减小封边厚度或增大成品尺寸）"})
+                              f"责任边：{'；'.join(detail) if detail else '无'}；"
+                              f"全部超扣边：{'、'.join(culprits) if culprits else '无'}，"
+                              f"请减小该边封边厚度或增大成品尺寸）"})
     for k in EDGE_KEYS:
         e = _edge_raw(p, k)
         lab = EDGE_LABELS[k]
-        if e['kind'] == 'exposed' and not edge_banded(e):
-            why = '未填写封边厚度' if e['thickness'] <= EPS else ''
+        if e['kind'] == 'exposed':
+            miss = []
+            if e['thickness'] <= EPS:
+                miss.append('未填写封边厚度')
             if not e['material']:
-                why = (why + '、' if why else '') + '未填写封边材料'
-            issues.append({'code': 'exposedunbanded', 'edge': k,
-                           'msg': f"{p.get('id')}（{name}）{lab}标为外露但{why or '未封边'}，"
-                                  f"外露边必须封边"})
+                miss.append('未填写封边材料')
+            if miss:
+                issues.append({'code': 'exposedunbanded', 'edge': k,
+                               'msg': f"{p.get('id')}（{name}）{lab}标为外露但"
+                                      f"{'、'.join(miss)}，外露边必须填写材料与厚度后"
+                                      f"才计入封边工序"})
         if e['kind'] == 'join' and e['thickness'] > EPS:
             issues.append({'code': 'joinbanded', 'edge': k,
                            'msg': f"{p.get('id')}（{name}）{lab}标为拼接却封了 "
@@ -371,15 +391,16 @@ def _seg_cross_proper(p1, p2, p3, p4):
 def transform_zone(zone, x, y, w, h, rotated, pw, ph, ox=0.0, oy=0.0):
     """零件【成品局部】容许区多边形 → 放置后绝对/可用坐标。
 
-    未旋转：区域按成品偏移 (ox,oy) 平移；旋转 90°（视觉顺时针）映射
-    (lx,ly)→(x+ph−ly, y+lx)，此时成品在毛坯原点（ox=oy=0）。
+    未旋转：区域按成品在毛坯内的偏移 (ox,oy) 平移；
+    旋转 90°（视觉顺时针，与 visual_edges 换向一致）映射
+    (lx,ly)→(x+ox+ph−ly, y+oy+lx)，(ox,oy) 为成品在毛坯内的偏移。
     坐标为成品局部坐标（未旋转时原点在成品左上角）。
     """
     out = []
     for p in (zone or {}).get('points') or []:
         lx, ly = _pt(p)
         if rotated:
-            out.append((x + ph - ly, y + lx))
+            out.append((x + ox + ph - ly, y + oy + lx))
         else:
             out.append((x + ox + lx, y + oy + ly))
     return out
@@ -932,8 +953,8 @@ def _facing_side(chain, role, rotated=False):
     vis = vis_trail if role == 'trail' else vis_lead
     if not rotated:
         return vis
-    # 旋转后 visual→canonical：top→right, right→bottom, bottom→left, left→top
-    inv = {'top': 'right', 'right': 'bottom', 'bottom': 'left', 'left': 'top'}
+    # 视觉顺时针旋转 visual→canonical：top→left, right→top, bottom→right, left→bottom
+    inv = {'top': 'left', 'right': 'top', 'bottom': 'right', 'left': 'bottom'}
     return inv[vis]
 
 
@@ -1729,11 +1750,25 @@ def pack(part_insts, sheet_insts, settings, locked=None, sort_key=None, groups=N
             })
             continue
         if p['w'] <= EPS or p['h'] <= EPS:
+            # 定位责任边：宽度/高度方向超扣最严重的封边
+            comp = p.get('comp') or {}
+            def worst(axis_keys):
+                cand = [(comp.get(k, 0.0), k) for k in axis_keys
+                        if comp.get(k, 0.0) < -EPS]
+                return min(cand, default=None)
+            ww = worst(('left', 'right'))
+            hh = worst(('top', 'bottom'))
+            resp = []
+            if p['w'] <= EPS and ww:
+                resp.append(f"宽度方向{EDGE_LABELS[ww[1]]}超扣 {ww[0]:g}mm")
+            if p['h'] <= EPS and hh:
+                resp.append(f"高度方向{EDGE_LABELS[hh[1]]}超扣 {hh[0]:g}mm")
             unplaced_out.append({
                 'uid': p['uid'], 'partId': p['partId'], 'name': p['name'],
                 'reason': f"封边补偿后毛坯尺寸 {p['w']:g}×{p['h']:g}mm 非正，"
-                          f"无法下料（成品 {p['productW']:g}×{p['productH']:g}mm，"
-                          f"请减小封边厚度或检查修边余量）", 'conflicts': [],
+                          f"无法下料（成品 {p['productW']:g}×{p['productH']:g}mm；"
+                          f"责任边：{'；'.join(resp) if resp else '无'}，"
+                          f"请减小该边封边厚度或增大成品尺寸）", 'conflicts': [],
             })
             continue
         reason = _unplaced_reason(p, states, settings)

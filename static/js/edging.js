@@ -14,9 +14,9 @@ const Edging = {
   KEYS: ['top', 'right', 'bottom', 'left'],
   LABELS: { top: '上边', right: '右边', bottom: '下边', left: '左边' },
   KIND_LABELS: { exposed: '外露', join: '拼接', none: '不处理' },
-  // canonical → visual（视觉顺时针 90°，与后端 visual_edges 一致）：
-  // top→left, right→top, bottom→right, left→bottom
-  ROT_MAP: { top: 'left', right: 'top', bottom: 'right', left: 'bottom' },
+  // canonical → visual（视觉顺时针 90°，与容许区变换、后端 visual_edges 一致）：
+  // top→right, right→bottom, bottom→left, left→top
+  ROT_MAP: { top: 'right', right: 'bottom', bottom: 'left', left: 'top' },
 
   edge(p, key) {
     const e = ((p && p.edges) || {})[key];
@@ -51,7 +51,11 @@ const Edging = {
     return p.edges;
   },
 
-  banded(e) { return e.kind === 'exposed' && e.thickness > this.EPS; },
+  banded(e) {
+    // 实际封边并可进入工序：外露 + 厚度为正 + 已填材料；
+    // 缺材料的外露边即使填了厚度也不封边（由 partIssues 报错），不进批次。
+    return e.kind === 'exposed' && e.thickness > this.EPS && !!e.material;
+  },
 
   /* 单条边补偿量 = −封边厚度 + 修边余量（未封边为 0） */
   edgeComp(e) { return this.banded(e) ? (-e.thickness + e.trim) : 0; },
@@ -75,15 +79,15 @@ const Edging = {
   },
   canonicalKey(visual, rotated) {
     if (!rotated) return visual;
-    // visual→canonical：top→right, right→bottom, bottom→left, left→top
-    return { top: 'right', right: 'bottom', bottom: 'left', left: 'top' }[visual];
+    // 视觉顺时针 visual→canonical：top→left, right→top, bottom→right, left→bottom
+    return { top: 'left', right: 'top', bottom: 'right', left: 'bottom' }[visual];
   },
 
   /* 外形四边（按 top,right,bottom,left）；每项附 canonical 原边名与 banded */
   visualEdges(p, rotated) {
-    // 外形 top,right,bottom,left 分别来自哪个 canonical 边
+    // 外形 top,right,bottom,left 分别来自哪个 canonical 边（视觉顺时针）
     const order = rotated
-      ? ['right', 'bottom', 'left', 'top']
+      ? ['left', 'top', 'right', 'bottom']
       : ['top', 'right', 'bottom', 'left'];
     return this.KEYS.map((vk, i) => {
       const ck = order[i];
@@ -126,36 +130,42 @@ const Edging = {
     return { w: p.w, h: p.h };
   },
 
-  /* 定义级工序核对：毛坯非正（指出造成超扣的具体边）/ 外露边未封 / 拼接边误封。
+  /* 定义级工序核对：毛坯非正（指出责任边）/ 外露边缺材料或厚度 / 拼接边误封。
      返回 [{code, partId, edge(canonical), msg}] */
   partIssues(p) {
     const issues = [];
-    const { bw, bh } = this.blankDims(p);
+    const { bw, bh, comp } = this.blankDims(p);
     const name = p.name || p.id;
     if (!(bw > this.EPS) || !(bh > this.EPS)) {
-      const culprits = [];
-      (['left', 'right']).forEach(k => {
-        const c = this.edgeComp(this.edge(p, k));
-        if (c < -this.EPS) culprits.push(`${this.LABELS[k]} ${fmtNum(c)}mm`);
-      });
-      (['top', 'bottom']).forEach(k => {
-        const c = this.edgeComp(this.edge(p, k));
-        if (c < -this.EPS) culprits.push(`${this.LABELS[k]} ${fmtNum(c)}mm`);
-      });
-      issues.push({ code: 'blanknonpositive', partId: p.id, edge: null,
+      const worst = (keys) => {
+        const c = keys.map(k => [comp[k], k]).filter(x => x[0] < -this.EPS);
+        return c.length ? c.reduce((a, b) => (a[0] < b[0] ? a : b)) : null;
+      };
+      const ww = worst(['left', 'right']), hh = worst(['top', 'bottom']);
+      const detail = [];
+      if (!(bw > this.EPS) && ww) detail.push(`宽度方向由${this.LABELS[ww[1]]}超扣 ${fmtNum(ww[0])}mm`);
+      if (!(bh > this.EPS) && hh) detail.push(`高度方向由${this.LABELS[hh[1]]}超扣 ${fmtNum(hh[0])}mm`);
+      const all = ['left', 'right', 'top', 'bottom']
+        .filter(k => comp[k] < -this.EPS)
+        .map(k => `${this.LABELS[k]} ${fmtNum(comp[k])}mm`);
+      issues.push({ code: 'blanknonpositive', partId: p.id, edge: (ww || hh || [null, null])[1],
         msg: `${p.id}（${name}）封边补偿后毛坯尺寸为 ${fmtNum(bw)}×${fmtNum(bh)}mm，` +
              `非正值无法下料（成品 ${fmtNum(p.width)}×${fmtNum(p.height)}mm；` +
-             `超扣边：${culprits.join('、') || '无'}，请减小封边厚度或增大成品尺寸）` });
+             `责任边：${detail.join('；') || '无'}；全部超扣边：${all.join('、') || '无'}，` +
+             `请减小该边封边厚度或增大成品尺寸）` });
     }
     this.KEYS.forEach((k) => {
       const e = this.edge(p, k);
       const lab = this.LABELS[k];
-      if (e.kind === 'exposed' && !this.banded(e)) {
-        const why = [];
-        if (!(+e.thickness > 0)) why.push('未填写封边厚度');
-        if (!e.material) why.push('未填写封边材料');
-        issues.push({ code: 'exposedunbanded', partId: p.id, edge: k,
-          msg: `${p.id}（${name}）${lab}标为外露但${why.join('、') || '未封边'}，外露边必须封边` });
+      if (e.kind === 'exposed') {
+        const miss = [];
+        if (!(+e.thickness > 0)) miss.push('未填写封边厚度');
+        if (!e.material) miss.push('未填写封边材料');
+        if (miss.length) {
+          issues.push({ code: 'exposedunbanded', partId: p.id, edge: k,
+            msg: `${p.id}（${name}）${lab}标为外露但${miss.join('、')}，` +
+                 `外露边必须填写材料与厚度后才计入封边工序` });
+        }
       }
       if (e.kind === 'join' && +e.thickness > this.EPS) {
         issues.push({ code: 'joinbanded', partId: p.id, edge: k,
@@ -214,15 +224,19 @@ const Edging = {
   },
 
   /* 分段排序：'shortFirst'=先短边后长边（同长度按 uid/边名稳定排序），
-     'longFirst'=先长边后短边；'manual' 时使用 order 中保存的 uid|edge 次序。 */
+     'longFirst'=先长边后短边；'manual' 时使用 order 中保存的 uid|edge 次序。
+     手动模式下，未列入 savedOrder 的段按当前短边序稳定追加；已列入段严格按
+     savedOrder 排列。重复连续换序时每次都以同一份 canonical 顺序为基准。 */
   orderSegments(segs, mode, savedOrder) {
     const idOf = s => s.uid + '|' + s.edgeVisual;
     if (mode === 'manual' && Array.isArray(savedOrder) && savedOrder.length) {
       const idx = new Map(savedOrder.map((id, i) => [id, i]));
+      // 新增/未记录的段：按短边序排在已记录段之后（不打断已确认的相邻关系）
       const rest = segs.filter(s => !idx.has(idOf(s)));
+      rest.sort((a, b) => a.length - b.length || idOf(a).localeCompare(idOf(b)));
       const known = segs.filter(s => idx.has(idOf(s)))
         .sort((a, b) => idx.get(idOf(a)) - idx.get(idOf(b)));
-      rest.sort((a, b) => a.length - b.length || idOf(a).localeCompare(idOf(b)));
+      return known.concat(rest);
       return known.concat(rest);
     }
     const arr = segs.slice();

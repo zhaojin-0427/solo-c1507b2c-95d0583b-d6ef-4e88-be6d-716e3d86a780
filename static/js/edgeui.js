@@ -177,12 +177,17 @@ const EdgeUI = {
     this._batchModal();
   },
 
+  /* 当前模式下重算批次（与渲染同源，保证换序基准=当前显示顺序） */
+  _currentBatches(lay) {
+    const mode = (App.edgingOrder || {}).mode || 'shortFirst';
+    return { mode, batches: Edging.batches(lay, mode, (App.edgingOrder || {}).orders) };
+  },
+
   _batchModal() {
     const root = document.getElementById('modal-root');
     const lay = App.layout();
     const render = () => {
-      const mode = (App.edgingOrder || {}).mode || 'shortFirst';
-      const batches = Edging.batches(lay, mode, (App.edgingOrder || {}).orders);
+      const { mode, batches } = this._currentBatches(lay);
       let segTotal = 0, lenTotal = 0;
       const body = batches.length ? batches.map((b) => {
         segTotal += b.count; lenTotal += b.total;
@@ -226,18 +231,31 @@ const EdgeUI = {
       root.querySelectorAll('input[name=edge-mode]').forEach(r => r.addEventListener('change', () => {
         App.edgingOrder = App.edgingOrder || { mode: 'shortFirst', orders: {} };
         App.edgingOrder.mode = r.value;
+        // 切到手动模式时，以当前显示顺序初始化该批次序（短边序），后续上/下移在此基础上调整
+        if (r.value === 'manual') {
+          const cur = this._currentBatches(lay).batches;
+          cur.forEach((b) => {
+            if (!App.edgingOrder.orders[b.key]) {
+              App.edgingOrder.orders[b.key] = b.segments.map(s => s.uid + '|' + s.edgeVisual);
+            }
+          });
+        }
         App.pushHistory();
         render();
       }));
       root.querySelectorAll('.edge-up,.edge-down').forEach(btn => btn.addEventListener('click', () => {
-        const key = btn.dataset.key, i = +btn.dataset.i, dir = btn.classList.contains('edge-up') ? -1 : 1;
+        const key = btn.dataset.key;
+        const i = +btn.dataset.i;
+        const dir = btn.classList.contains('edge-up') ? -1 : 1;
         App.edgingOrder = App.edgingOrder || { mode: 'shortFirst', orders: {} };
-        const b0 = Edging.batches(lay, 'shortFirst', App.edgingOrder.orders)
-          .find(x => x.key === key);
-        const segs = b0.segments.slice();
-        [segs[i], segs[i + dir]] = [segs[i + dir], segs[i]];
-        App.edgingOrder.orders[key] = segs.map(s => s.uid + '|' + s.edgeVisual);
         App.edgingOrder.mode = 'manual';
+        // 以【当前正在显示的该批顺序】为基准换序（避免与另一排序混用）
+        const shown = (this._currentBatches(lay).batches.find(x => x.key === key) || {}).segments || [];
+        const segs = shown.slice();
+        const j = i + dir;
+        if (j < 0 || j >= segs.length) return;
+        [segs[i], segs[j]] = [segs[j], segs[i]];
+        App.edgingOrder.orders[key] = segs.map(s => s.uid + '|' + s.edgeVisual);
         App.pushHistory();
         render();
       }));

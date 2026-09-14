@@ -170,15 +170,15 @@ const Defects = {
     return false;
   },
 
-  /* 零件局部容许区 → 放置后坐标。旋转映射与后端一致：(lx,ly)→(x+ph-ly, y+lx)；
-     未旋转时成品相对毛坯原点偏移 (ox,oy)（封边补偿，可为负=封边条悬出）。 */
+  /* 零件成品局部容许区 → 放置后坐标。旋转映射与后端一致：(lx,ly)→(x+ox+ph−ly, y+oy+lx)；
+     未旋转按成品在毛坯内偏移 (ox,oy) 平移（封边补偿，可为负=封边条悬出）。 */
   transformZone(zone, p, pd) {
     const rotated = !!p.rotated;
     const pw = +pd.width, ph = +pd.height;
     const g = (typeof Edging !== 'undefined') ? Edging.productGeom(pd, rotated)
       : { w: pw, h: ph, ox: 0, oy: 0 };
     return (zone.points || []).map(q => rotated
-      ? { x: p.x + ph - q.y, y: p.y + q.x }
+      ? { x: p.x + g.ox + ph - q.y, y: p.y + g.oy + q.x }
       : { x: p.x + g.ox + q.x, y: p.y + g.oy + q.y });
   },
 

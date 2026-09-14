@@ -18,7 +18,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nesting import generate_layouts, orientations  # noqa: E402
+from nesting import (  # noqa: E402
+    generate_layouts, orientations, expand_parts, part_edge_issues)
 
 SETTINGS = {"kerf": 3, "margin": 5, "spacing": 2}
 GAP = SETTINGS["kerf"] + SETTINGS["spacing"]
@@ -752,12 +753,14 @@ class TestEdgeCompensation(unittest.TestCase):
         self.assertAlmostEqual(bh, 398.0)     # 400 - 2
         g = product_geom(p, False)
         self.assertEqual((g["w"], g["h"], g["ox"], g["oy"]), (600.0, 400.0, -0.5, -2.0))
-        # 旋转：canonical 左封边→visual 上悬出，成品偏移 (comp.bottom=0, comp.left=-0.5)
+        # 视觉顺时针旋转：canonical top→visual right、right→bottom、left→top
         gr = product_geom(p, True)
         self.assertEqual((gr["w"], gr["h"], gr["ox"], gr["oy"]), (400.0, 600.0, 0.0, -0.5))
         ves = {e["key"]: e for e in visual_edges(p, True)}
-        self.assertEqual(ves["bottom"]["canonical"], "left")
-        self.assertEqual(ves["top"]["canonical"], "right")
+        self.assertEqual(ves["top"]["canonical"], "left")
+        self.assertEqual(ves["right"]["canonical"], "top")
+        self.assertEqual(ves["bottom"]["canonical"], "right")
+        self.assertEqual(ves["left"]["canonical"], "bottom")
 
     def test_layout_uses_blank_product_seam_uses_finished(self):
         # A 右边封 2mm、B 左边封 2mm：毛坯净距 6mm（≥kerf+spacing=5 不可行）
@@ -878,6 +881,71 @@ class TestEdgeCompensation(unittest.TestCase):
         q = lay["sheets"][0]["placements"][0]
         self.assertEqual((q["w"], q["h"]), (300.0, 200.0))
         self.assertEqual(q["product"], {"w": 300.0, "h": 200.0, "ox": 0.0, "oy": 0.0})
+
+    def test_exposed_edge_missing_material_flagged_and_excluded(self):
+        # 外露边填了厚度但缺材料：必须报错（定位到边），且该边不参与毛坯扣除/不进批次
+        from nesting import edge_banded, blank_dims, _edge_raw
+        p = {"id": "P", "name": "件", "width": 100, "height": 100, "edges": {
+            "top": {"kind": "exposed", "material": "", "thickness": 2, "trim": 0},
+            "right": {"kind": "exposed", "material": "ABS", "thickness": 2, "trim": 0},
+            "bottom": {"kind": "none"}, "left": {"kind": "none"}}}
+        issues = {i["code"]: i for i in part_edge_issues(p)}
+        self.assertIn("exposedunbanded", issues)
+        self.assertEqual(issues["exposedunbanded"]["edge"], "top")
+        self.assertIn("未填写封边材料", issues["exposedunbanded"]["msg"])
+        # 缺材料的上边不视为已封边 → 毛坯只扣右边
+        self.assertFalse(edge_banded(_edge_raw(p, "top")))
+        self.assertTrue(edge_banded(_edge_raw(p, "right")))
+        bw, bh, _ = blank_dims(p)
+        self.assertEqual((bw, bh), (98.0, 100.0))
+
+    def test_negative_blank_names_responsible_edge_in_unplaced(self):
+        # 左边封边 20mm 把毛坯宽扣成负数：未放置原因须指出责任边（左边）
+        payload = {
+            "settings": {"kerf": 3, "margin": 0, "spacing": 0},
+            "sheets": [{"id": "S1", "name": "板", "width": 500, "height": 500,
+                        "grain": "none", "quantity": 1}],
+            "parts": [{"id": "P1", "name": "小件", "width": 10, "height": 100,
+                       "quantity": 1, "rotatable": False, "grain": "none",
+                       "edges": {
+                           "top": {"kind": "none"}, "bottom": {"kind": "none"},
+                           "right": {"kind": "none"},
+                           "left": {"kind": "exposed", "material": "ABS",
+                                    "thickness": 20, "trim": 0}}}],
+        }
+        res = generate_layouts(payload)
+        lay = res["layouts"][0]
+        self.assertEqual(lay["stats"]["unplacedCount"], 1)
+        u = lay["unplaced"][0]
+        self.assertEqual(u["partId"], "P1")   # 定位到具体零件
+        reason = u["reason"]
+        self.assertIn("毛坯尺寸", reason)
+        self.assertIn("左边", reason)        # 责任边
+        self.assertIn("-20", reason)
+
+    def test_rotated_compensated_allow_zone_offset(self):
+        # 旋转 90° + 封边补偿：容许区须按成品偏移 ox/oy 变换，否则区外缺陷被误放行。
+        # 成品 200×100，左封边 2mm（无余量）→ 毛坯 198×100；
+        # 旋转后毛坯 100×198，成品偏移 (comp.bottom=0, comp.left=-2)。
+        from nesting import transform_zone, instance_product
+        part = {"id": "P1", "width": 200, "height": 100, "edges": {
+            "top": {"kind": "none"}, "bottom": {"kind": "none"}, "right": {"kind": "none"},
+            "left": {"kind": "exposed", "material": "ABS", "thickness": 2, "trim": 0}}}
+        inst = expand_parts([part])[0]
+        prod = instance_product(inst, True)
+        self.assertEqual((prod["ox"], prod["oy"]), (0.0, -2.0))
+        # 容许区覆盖成品左下角局部方块 (0,80)-(40,100)；旋转后：
+        # visual = (ox + ph - ly, oy + lx)，ly=80 → x=0+100-80=20
+        zone = {"points": [(0, 80), (40, 80), (40, 100), (0, 100)]}
+        pts = transform_zone(zone, 50.0, 60.0, 100.0, 198.0, True,
+                             inst["productW"], inst["productH"],
+                             prod["ox"], prod["oy"])
+        # 期望整体平移 (50,60) 后再旋转映射
+        want = [(50 + 100 - 80, 60 - 2 + 0), (50 + 100 - 80, 60 - 2 + 40),
+                (50 + 100 - 100, 60 - 2 + 40), (50 + 100 - 100, 60 - 2 + 0)]
+        for got, w in zip(pts, want):
+            self.assertAlmostEqual(got[0], w[0], places=6)
+            self.assertAlmostEqual(got[1], w[1], places=6)
 
 
 if __name__ == "__main__":
